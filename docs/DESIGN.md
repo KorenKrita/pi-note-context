@@ -49,7 +49,7 @@ Limits: 16 KiB UTF-8 hard ceiling and a model-aware token estimate ceiling (defa
 
 Result payload: `{ revision, bytes, tokensEstimate, remainingBytes }`. The notebook text is not echoed back.
 
-Persistence: one `custom` journal entry (`note-context/notebook`) per write, carrying `{ version, revision, sections, reviewedThrough }` where `reviewedThrough` is the id of the last journal entry the model could see when it wrote.
+Persistence: one `custom` journal entry (`note-context/notebook`) per write, carrying `{ version, revision, sections, reviewedThrough }` where `reviewedThrough` is the id of the **assistant message entry that issued the write** — everything before it is guaranteed visible to the model at write time, and it is already persisted when the tool runs (sibling tool results in the same batch may not be).
 
 ### 3.2 `new_context`
 
@@ -63,7 +63,9 @@ Zero arguments. Calling it is an attestation that the current notebook revision 
 | Projected reclaim ≥ `minReclaimTokens` (default 20K) | `rollover would reclaim ~NK tokens; below threshold — continue working` |
 | Not already pending | `rollover already scheduled` |
 
-Safe boundary: after all tool results of the current assistant turn are recorded, before the next LLM call (Pi's `turn_end` → `prepareNextTurn` sequence).
+On success the tool result reads: `rollover scheduled: window #N → #N+1 at the end of this turn. End the turn now without further tool calls.` The rollover itself runs at the safe boundary: after all tool results of the current assistant turn are recorded, before the next LLM call (Pi's `turn_end` → `prepareNextTurn` sequence).
+
+Reclaim projection reuses Pi's exported compaction primitives (`findCutPoint`, `estimateTokens`, `buildContextEntries`, `sessionEntryToContextMessages`) so the number the gate sees is the number the compaction will produce: `estimate(current context) − estimate(entries from the cut onward + template summary)`.
 
 ### 3.3 `history`
 
@@ -105,12 +107,14 @@ It is **not** injected on every call. Rationale: constant injection of a 4K-toke
 
 In the `context` event, every model-visible message that already has a persisted journal id gets a trailing text block `[history entry=<id>]`. Ids are Pi's real entry ids, never invented aliases. Structured (JSON) tool output is not modified inside; the trailer is a separate text block. Image and other non-text blocks are preserved.
 
+Cache impact: trailers are idempotent per entry, so the serialized prefix is stable across calls except at the point where a message first acquires its id (normally the last one or two messages). The ledger records provider cache-read tokens so this can be verified rather than assumed.
+
 ## 5. Rollover
 
 Triggered by a validated `new_context`, or by the host fallback (§6). Implemented through `session_before_compact`:
 
 1. Read `preparation.firstKeptEntryId` (Pi's cut point, which keeps `keepRecentTokens` of recent turns intact and never splits a tool exchange).
-2. Determine the **task-defining user messages**: the earliest user message of the current task segment plus any later user messages that add constraints or corrections, that fall before the cut. Pin them verbatim into the summary, labelled as historical task context ("do not re-execute").
+2. Pin user messages that fall before the cut, by a mechanical rule (no judgement, no LLM): the first user message of the window verbatim, then every later user message before the cut, each truncated to `pinnedMessageMaxChars` (default 600); total pinned budget `pinnedTotalMaxTokens` (default 4K). When the budget is exceeded, the first message keeps full text and the rest keep first line + id. Deciding which of these are binding constraints is the model's job in the Task section; the host only guarantees they are not lost. All pinned text is labelled historical task context ("already acted on; do not re-execute").
 3. Compose the summary (deterministic template):
 
 ```
@@ -137,6 +141,7 @@ The notebook snapshot inside the summary is what makes the compaction entry self
 - If `event.customInstructions` is present (user ran `/compact` with instructions), return `undefined` — Pi's LLM summary runs.
 - If another extension owns compaction for the current model (detected by a registry the other extension can populate, or by configuration listing model ids — initial implementation: configuration), return `undefined` for the compaction step. Notebook, status line, reminders and `history` keep working; `new_context` in this mode calls `ctx.compact()` and lets the owner produce the summary. The status line shows `compaction: external`.
 - Load-order independence: both orders are tested.
+- Pi does not pass earlier handlers' results to later ones, so configuration is the only reliable ownership signal. Runtime check: if `session_compact` reports a `compactionEntry.details.remoteCompaction` field while this plugin produced the summary, log a warning — the two extensions both acted.
 
 ## 6. Threshold reminder and host fallback
 
@@ -157,7 +162,7 @@ Pi's own threshold is `contextWindow − reserveTokens`. This plugin acts earlie
 4. If no valid checkpoint after the repair attempt, or Pi's own overflow path fires first → return `undefined` from `session_before_compact` so Pi's LLM summary runs. **Never** perform the template rollover without a valid notebook.
 5. Any outcome clears the maintenance scope. A reminder that survives into the new window (because it landed in the kept tail) is neutralised by its attempt id no longer being active.
 
-Tool dispatch enforcement during `maintenance:requested`: calls other than `notes` are answered with a tool result explaining the maintenance state rather than executed.
+Tool dispatch enforcement during `maintenance:requested`: a `tool_call` handler returns `{ block: true, reason: "context maintenance in progress — only `notes` is available until the checkpoint lands" }` for every tool except `notes`; Pi turns the block into an error tool result the model sees, so the instruction is enforced, not merely stated.
 
 ## 7. Guidance to the model
 
@@ -215,6 +220,8 @@ Correctness signals require reading sessions; the ledger locates candidates. Kil
   "leadTokens": 24000,
   "fallbackBufferTokens": 12000,
   "minReclaimTokens": 20000,
+  "pinnedMessageMaxChars": 600,
+  "pinnedTotalMaxTokens": 4096,
   "externalCompactionModels": ["local-responses/gpt-5.6-sol"],
   "userVisibleNotebook": true
 }
