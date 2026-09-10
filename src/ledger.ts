@@ -1,0 +1,58 @@
+/**
+ * Observability ledger (DESIGN.md §10): append-only JSONL, counts and ids only.
+ * Failures are swallowed; a lost row costs nothing but a smaller n.
+ */
+
+import { appendFile, mkdir, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+
+export const LEDGER_MAX_BYTES = 8 * 1024 * 1024;
+
+export type LedgerRow =
+  | { kind: "notes_write"; session: string; window: number; revision: number; bytes: number; reviewOnly: boolean }
+  | { kind: "notes_rejected"; session: string; window: number; reason: string }
+  | { kind: "gate"; session: string; window: number; ok: boolean; blocker?: string; reclaim?: number }
+  | { kind: "rollover"; session: string; fromWindow: number; reason: string; notebookRevision: number; reclaim: number | null; pinned: number }
+  | { kind: "rollover_declined"; session: string; window: number; why: string }
+  | { kind: "reminder"; session: string; window: number; zone: string }
+  | { kind: "maintenance"; session: string; window: number; action: string; attempt: number }
+  | { kind: "history"; session: string; window: number; mode: "search" | "read" | "list"; hits?: number; turnsSinceRollover: number | null }
+  | { kind: "cache"; session: string; window: number; cacheRead: number; input: number };
+
+export function ledgerPath(env: NodeJS.ProcessEnv = process.env): string {
+  const base = env["PI_CODING_AGENT_DIR"] ?? join(homedir(), ".pi", "agent");
+  return join(base, "state", "note-context-ledger.jsonl");
+}
+
+export function ledgerDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env["NOTE_CONTEXT_LEDGER_DISABLED"] === "1";
+}
+
+let queue: Promise<void> = Promise.resolve();
+
+export function appendLedger(row: LedgerRow, env: NodeJS.ProcessEnv = process.env): void {
+  if (ledgerDisabled(env)) return;
+  const line = `${JSON.stringify({ ts: new Date().toISOString(), ...row })}\n`;
+  const path = ledgerPath(env);
+  queue = queue
+    .then(async () => {
+      try {
+        await mkdir(dirname(path), { recursive: true });
+        try {
+          const s = await stat(path);
+          if (s.size + line.length > LEDGER_MAX_BYTES) return;
+        } catch {
+          /* new file */
+        }
+        await appendFile(path, line, "utf8");
+      } catch {
+        /* swallow */
+      }
+    })
+    .catch(() => {});
+}
+
+export function flushLedger(): Promise<void> {
+  return queue;
+}

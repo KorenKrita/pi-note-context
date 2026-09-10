@@ -6,13 +6,35 @@ Three model-invoked tools:
 
 - `notes` — a small, sectioned checkpoint of working state that survives context-window rollovers
 - `history` — read back earlier conversation, including what left the window
-- `new_context` — start a fresh window without an LLM summary *(step 2, not yet shipped)*
+- `new_context` — start a fresh window without an LLM summary; the new window opens with the notebook snapshot and the task-defining user messages
 
 Design: [`docs/DESIGN.md`](docs/DESIGN.md). Independent review and responses: [`docs/review/`](docs/review/).
 
 ## Status
 
-Step 1 of 4 (see DESIGN.md §13): `notes`, `history`, status line, branch reconstruction. No rollover yet.
+Steps 1–3 of 4 shipped (see DESIGN.md §13): tools, gated rollover, threshold reminder, host fallback, entry-id trailers, ledger. Step 4 (tuning from real sessions) is ongoing.
+
+## Configuration
+
+Optional `~/.pi/agent/pi-note-context.json` (global only; every field optional):
+
+```json
+{
+  "notebookMaxBytes": 16384,
+  "notebookMaxTokens": 4096,
+  "leadTokens": 24000,
+  "fallbackBufferTokens": 12000,
+  "minReclaimTokens": 20000,
+  "pinnedMessageMaxChars": 600,
+  "pinnedTotalMaxTokens": 4096,
+  "externalCompactionModels": [],
+  "entryIdTrailers": true
+}
+```
+
+`externalCompactionModels` lists `provider/model` ids whose compaction is owned by another extension (e.g. remote Codex compaction); this plugin then yields the summary step for those models but keeps notes, history, reminders and the status line.
+
+Ledger: `~/.pi/agent/state/note-context-ledger.jsonl` (counts and ids only). Disable with `NOTE_CONTEXT_LEDGER_DISABLED=1`.
 
 ## Install
 

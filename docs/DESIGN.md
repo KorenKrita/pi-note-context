@@ -2,7 +2,7 @@
 
 Notebook-backed context windows for the Pi coding agent. The model keeps a small checkpoint of its working state; when a window has served its purpose the model — or, failing that, the host — starts a fresh window without an LLM summary. Everything that left the window stays in the session journal and can be read back.
 
-Status: design accepted 2026-09-10 after an independent review (`docs/review/`). Not yet implemented.
+Status: design accepted 2026-09-10 after an independent review (`docs/review/`); implemented the same day (ship steps 1–3). Deviations from this document are recorded in §14.
 
 ## 1. Problem
 
@@ -251,3 +251,12 @@ Pi peer version: `0.85.x`. Tests: Bun. Host fixture on real Pi for: gate blocker
 2. `new_context` with gate, template rollover with embedded snapshot, `/compact`-with-instructions passthrough, external-owner passthrough.
 3. Reminder + fallback state machine + dispatch guard.
 4. Read real sessions; tune `leadTokens`, `minReclaimTokens`, section guidance.
+
+## 14. Implementation notes (deviations and clarifications)
+
+- **Rollover timing.** A model-requested rollover runs on `agent_settled`, not `turn_end`: `ctx.compact()` aborts any in-flight run, so the only safe moment is after the run has settled. The model is told to end its turn; if it keeps working instead, the rollover simply waits — verified end to end. After compaction a `followUp` continuation message (`triggerTurn: true`) resumes the task from the notebook's Next.
+- **Fallback compaction** likewise runs via `ctx.compact()` immediately after the checkpoint lands (aborting the current run) and sends the same continuation. Verified end to end on a 60K-window model: reminder → notes → maintenance request → notes → template rollover with `reason: "fallback"`.
+- **Compaction settings** are not exposed to extensions; the plugin uses Pi's documented defaults (`keepRecentTokens` 20K, `reserveTokens` 16384) for gate projection and pressure zones. If the user changes them in settings.json the gate's reclaim estimate drifts; the actual compaction still uses Pi's `preparation.firstKeptEntryId`.
+- **Threshold rollover without a model request** (Pi's own threshold fires first): the template rollover is used only when the notebook's `reviewedThrough` is at or after the last dropped entry; otherwise Pi's LLM summary runs (`rollover_declined: stale_notebook_at_threshold` in the ledger).
+- **Status line** is appended at the end of the message array in the `context` event; Pi guarantees this is a protocol boundary at `transformContext` time.
+- **Entry-id trailers** match journal entries to context messages by `(role, timestamp, toolCallId)`; assistant messages are never modified.

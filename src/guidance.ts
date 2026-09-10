@@ -33,3 +33,11 @@ export const NOTES_GUIDELINES = [
 export const HISTORY_GUIDELINES = [
   "Use history for a specific missing fact after a rollover; prefer a known [history entry=ID] over a search.",
 ];
+
+export const NEW_CONTEXT_DESCRIPTION = `Start a fresh context window at the end of this turn, without an LLM summary. The new window opens with the notebook snapshot and the task-defining user messages from this window; everything else stays readable with \`history\`.
+No arguments. Calling it attests that the current notebook revision is sufficient to continue. Refused when: no notebook exists; the notebook was last written/reviewed before material that would leave the window (update notes or notes({reviewed:true}) first); the projected reclaim is below the configured minimum; a rollover is already scheduled.
+On success, end the turn without further tool calls.`;
+export const NEW_CONTEXT_SNIPPET = "Start a fresh context window once finished work no longer needs to be in view and notes are current";
+export const NEW_CONTEXT_GUIDELINES = [
+  "Call new_context only after the notes result has returned in an earlier turn; never in the same batch as notes or work tools.",
+];
