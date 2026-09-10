@@ -182,7 +182,7 @@ export default function noteContext(pi: ExtensionAPI): void {
         pi.appendEntry(NOTEBOOK_ENTRY_TYPE, record);
         appendLedger({ kind: "notes_write", session: sessionId(ctx), window, revision: record.revision, bytes: 0, reviewOnly: true });
         onNotesLanded(ctx, record.revision);
-        return record;
+        return { record, auto: considerAutoRollover(ctx, notebookOf(ctx)) };
       };
 
       if (params.reviewed && !hasSections) {
@@ -190,8 +190,8 @@ export default function noteContext(pi: ExtensionAPI): void {
           onNotesFailed(ctx, "nothing to review: the notebook is empty");
           return fail("Nothing to review: the notebook is empty. Write sections first.");
         }
-        const record = commitReview();
-        return text(`Notebook revision ${record.revision}: reviewed, unchanged.`, { revision: record.revision, reviewOnly: true });
+        const { record, auto } = commitReview();
+        return text(`Notebook revision ${record.revision}: reviewed, unchanged.${auto}`, { revision: record.revision, reviewOnly: true, autoRollover: auto !== "" });
       }
 
       const result = applySections(current.sections, { sections: params.sections!, replaceAll: params.replaceAll }, config.limits);
@@ -201,18 +201,19 @@ export default function noteContext(pi: ExtensionAPI): void {
         return fail(`notes rejected (${result.reason}): ${result.detail}`);
       }
       if (!result.changed && !params.replaceAll) {
-        const record = commitReview();
-        return text(`Notebook revision ${record.revision}: content unchanged, review marker updated.`, { revision: record.revision, reviewOnly: true });
+        const { record, auto } = commitReview();
+        return text(`Notebook revision ${record.revision}: content unchanged, review marker updated.${auto}`, { revision: record.revision, reviewOnly: true, autoRollover: auto !== "" });
       }
       const record = makeRecord(current, result.sections, issuingAssistantId(ctx));
       pi.appendEntry(NOTEBOOK_ENTRY_TYPE, record);
       appendLedger({ kind: "notes_write", session: sessionId(ctx), window, revision: record.revision, bytes: result.size.bytes, reviewOnly: false });
       onNotesLanded(ctx, record.revision);
+      const auto = considerAutoRollover(ctx, notebookOf(ctx));
       const remainingBytes = config.limits.maxBytes - result.size.bytes;
       const remainingTokens = config.limits.maxTokens - result.size.tokensEstimate;
       return text(
-        `Notebook revision ${record.revision} saved: ${Object.keys(result.sections).length} section(s), ${result.size.bytes} bytes / ~${result.size.tokensEstimate} tokens; ${remainingBytes} bytes / ~${remainingTokens} tokens remaining.`,
-        { revision: record.revision, sections: Object.keys(result.sections), bytes: result.size.bytes, tokensEstimate: result.size.tokensEstimate },
+        `Notebook revision ${record.revision} saved: ${Object.keys(result.sections).length} section(s), ${result.size.bytes} bytes / ~${result.size.tokensEstimate} tokens; ${remainingBytes} bytes / ~${remainingTokens} tokens remaining.${auto}`,
+        { revision: record.revision, sections: Object.keys(result.sections), bytes: result.size.bytes, tokensEstimate: result.size.tokensEstimate, autoRollover: auto !== "" },
       );
     },
   });
@@ -279,7 +280,12 @@ export default function noteContext(pi: ExtensionAPI): void {
         summaryTokens: summaryTokenEstimate(ctx, notebook),
       });
       appendLedger({ kind: "gate", session: sessionId(ctx), window, ok: verdict.ok, ...(verdict.ok ? { reclaim: verdict.reclaimTokens } : { blocker: verdict.blocker, reclaim: verdict.reclaimTokens }) });
-      if (!verdict.ok) return fail(`new_context refused: ${verdict.message}`);
+      if (!verdict.ok) {
+        if (verdict.blocker === "already_pending" && pendingRollover?.reason === "host") {
+          return text("A rollover is already scheduled by the host for the end of this turn; end the turn now.", { blocker: "already_pending", host: true });
+        }
+        return fail(`new_context refused: ${verdict.message}`);
+      }
       pendingRollover = { reason: "model", requestedAtLeaf: ctx.sessionManager.getLeafId() };
       return text(
         `rollover scheduled: window #${window} → #${window + 1} at the end of this turn (~${Math.round(verdict.reclaimTokens / 1000)}K tokens reclaimed, ${verdict.droppedEntries} entries leave the window). End the turn now without further tool calls.`,
@@ -289,6 +295,31 @@ export default function noteContext(pi: ExtensionAPI): void {
   });
 
   // -------------------------------------------------- maintenance hooks (notes)
+  /**
+   * Host-initiated rollover (DESIGN.md §15): after every notes write, run the gate. When it
+   * passes, schedule the rollover without waiting for the model to call new_context, and
+   * tell the model in the notes result. Returns the suffix to append to that result.
+   */
+  function considerAutoRollover(ctx: ExtensionContext, notebook: Notebook): string {
+    if (!config.autoRollover) return "";
+    if (pendingRollover || inFlightRollover || maintenance.kind !== "idle") return "";
+    if (externalOwner(ctx)) return "";
+    const branch = branchOf(ctx);
+    const window = currentWindow(branch);
+    const verdict = evaluateGate({
+      branch: contextOf(ctx),
+      notebook,
+      settings: { keepRecentTokens: compactionSettings(ctx).keepRecentTokens },
+      minReclaimTokens: config.minReclaimTokens,
+      pending: false,
+      summaryTokens: summaryTokenEstimate(ctx, notebook),
+    });
+    if (!verdict.ok) return "";
+    pendingRollover = { reason: "host", requestedAtLeaf: ctx.sessionManager.getLeafId() };
+    appendLedger({ kind: "gate", session: sessionId(ctx), window, ok: true, reclaim: verdict.reclaimTokens, auto: true });
+    return `\nRollover scheduled by the host: window #${window} → #${window + 1} at the end of this turn (~${Math.round(verdict.reclaimTokens / 1000)}K tokens reclaimed). Finish what this turn needs; the new window opens with these notes.`;
+  }
+
   function onNotesLanded(ctx: ExtensionContext, revision: number): void {
     const r = step(maintenance, { type: "notes_ok", revision }, () => ++attemptCounter);
     maintenance = r.state;
@@ -403,7 +434,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   // in-flight run, so this is the only safe moment. pendingRollover is cleared
   // synchronously before compact() to make the schedule idempotent.
   pi.on("agent_settled", async (_event, ctx) => {
-    if (!pendingRollover || pendingRollover.reason !== "model") return;
+    if (!pendingRollover || (pendingRollover.reason !== "model" && pendingRollover.reason !== "host")) return;
     inFlightRollover = { reason: pendingRollover.reason };
     pendingRollover = null;
     ctx.compact({

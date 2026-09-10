@@ -55,7 +55,7 @@ describe("maintenance state machine", () => {
 });
 
 describe("trailers", () => {
-  test("adds [history entry=id] to user and toolResult only, idempotently, preserving untouched references", () => {
+  test("appends [history entry=id] to the last text block of user and toolResult only, idempotently, preserving untouched references", () => {
     const branch = [user("u1", "hello"), assistant("a1", "ok", [{ id: "c1", name: "read", args: {} }]), toolResult("t1", "c1", "read", "data")];
     const idx = buildIdIndex(branch);
     const msgs: AgentMessage[] = branch.map((e) => (e as { message: AgentMessage }).message);
@@ -64,11 +64,25 @@ describe("trailers", () => {
     const a = out[1]!;
     const t = out[2]!;
     expect(a).toBe(msgs[1]!); // same reference
-    expect(u.role === "user" && Array.isArray(u.content) && (u.content.at(-1) as { text: string }).text).toBe("[history entry=u1]");
-    expect(t.role === "toolResult" && (t.content.at(-1) as { text: string }).text).toBe("[history entry=t1]");
+    // block count unchanged (ObservationPack's "every block is text" classification still holds)
+    expect(u.role === "user" && Array.isArray(u.content) && u.content.length).toBe(1);
+    expect(u.role === "user" && Array.isArray(u.content) && (u.content[0] as { text: string }).text).toBe("hello\n[history entry=u1]");
+    expect(t.role === "toolResult" && t.content.length).toBe(1);
+    expect(t.role === "toolResult" && (t.content[0] as { text: string }).text).toBe("data\n[history entry=t1]");
     const again = addTrailers(out, idx);
     expect(again[0]).toBe(out[0]!);
     expect(again[2]).toBe(out[2]!);
+  });
+
+  test("a tool result replaced wholesale by another projection (placeholder) is re-tagged on the next pass", () => {
+    const branch = [toolResult("t1", "c1", "read", "x".repeat(20_000))];
+    const idx = buildIdIndex(branch);
+    const original = (branch[0] as { message: AgentMessage }).message;
+    const tagged = addTrailers([original], idx)[0]!;
+    // simulate ObservationPack replacing content with a placeholder
+    const placeholder = { ...tagged, content: [{ type: "text" as const, text: "[large tool result replaced] id: obs_1" }] } as AgentMessage;
+    const retagged = addTrailers([placeholder], idx)[0]!;
+    expect(retagged.role === "toolResult" && (retagged.content[0] as { text: string }).text).toBe("[large tool result replaced] id: obs_1\n[history entry=t1]");
   });
 
   test("messages not yet persisted get no trailer", () => {

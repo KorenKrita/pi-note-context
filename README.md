@@ -30,9 +30,12 @@ Optional `~/.pi/agent/pi-note-context.json` (global only; every field optional):
   "pinnedMessageMaxChars": 600,
   "pinnedTotalMaxTokens": 4096,
   "externalCompactionModels": [],
-  "entryIdTrailers": true
+  "entryIdTrailers": true,
+  "autoRollover": true
 }
 ```
+
+`autoRollover` (default `true`): after a notes write that passes the gate, the host schedules the rollover itself — the model does not need to call `new_context`.
 
 `externalCompactionModels` lists `provider/model` ids whose compaction is owned by another extension (e.g. remote Codex compaction); this plugin then yields the summary step for those models but keeps notes, history, reminders and the status line.
 
@@ -52,3 +55,7 @@ Requires Pi `>=0.85.0 <0.86.0`.
 bun install
 bun run verify   # typecheck + tests
 ```
+
+## With SoL-Pi
+
+Compatible with SoL-Pi's Action Fusion and ObservationPack; list `pi-note-context` **after** SoL-Pi in `packages`. Do not enable SoL-Pi's Online Context Compact together with this plugin (two competing rollover managers). See DESIGN.md §16.

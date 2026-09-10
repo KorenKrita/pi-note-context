@@ -266,3 +266,21 @@ Pi peer version: `0.85.x`. Tests: Bun. Host fixture on real Pi for: gate blocker
 - **Stale maintenance messages** in the retained tail are rewritten in the `context` event to a neutral "completed; no action required" line, keyed by `details.attempt`.
 - **Tool failures** are thrown (`fail()`), because agent-core ignores a returned `isError` flag.
 - **`history` pagination:** `offset` is a character offset when reading by `id` (footer gives the next value) and a matching-entry skip count when searching.
+
+## 15. Host-initiated rollover (added 2026-09-11)
+
+Observation from real use and from the pi-context ledger: models rarely produce the meta-cognitive act of deciding to start a new window, even with good guidance in view — attention goes to the task, not to the model's own context. Writing notes, by contrast, is a task-shaped act models do perform. So the host uses the notes write as the trigger:
+
+- After every successful `notes` write or review, the host runs the same gate as `new_context` (§3.2). If it passes and no rollover is pending, the host schedules the rollover itself (`reason: "host"`) and appends one sentence to the notes result: *"Rollover scheduled by the host: window #N → #N+1 at the end of this turn (~XK tokens reclaimed). Finish what this turn needs; the new window opens with these notes."*
+- `new_context` remains available as a manual accelerator; calling it while a host rollover is pending returns a non-error "already scheduled" notice.
+- Config `autoRollover` (default `true`) turns this off; `minReclaimTokens` is the only economic input. A fuller economic model (cache-rebuild cost × remaining requests, as in SoL-Pi's `economics.ts`) is deferred until the ledger provides real cache-hit and turns-per-window data.
+- Ledger `gate` rows carry `auto: true` when the host initiated.
+
+Verified live (Pi 0.85.1, deepseek-v4-flash, model instructed never to call `new_context`): notes → 4 large reads → notes → host scheduled → template rollover `reason: host` → continuation → task completed.
+
+## 16. Coexistence with SoL-Pi
+
+- **Action Fusion**: independent.
+- **ObservationPack**: compatible. Trailers are appended to the last text block (block count unchanged, so ObservationPack still classifies the result as pure text); when ObservationPack replaces a result with a placeholder, the next `context` pass re-tags it. Load pi-note-context **after** SoL-Pi in `packages` so the re-tag runs last.
+- **Online Context Compact**: do not enable together with this plugin. It maintains a second model-side state (`update_plan`) and compacts via `customInstructions`, which this plugin treats as user-directed and yields to — the notebook snapshot would not enter the summary.
+- **Evidence-Preserving Reducer**: independent, but redundant with notes for the same purpose (turning long logs into conclusions).

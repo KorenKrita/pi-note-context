@@ -39,21 +39,39 @@ export function buildIdIndex(branch: readonly SessionEntry[]): Map<string, strin
   return idx;
 }
 
-function hasTrailer(content: readonly { type: string; text?: string }[]): boolean {
-  const last = content[content.length - 1];
-  return !!last && last.type === "text" && TRAILER_RE.test(last.text ?? "");
+const TRAILER_TAIL_RE = /\n\[history entry=([A-Za-z0-9_-]+)\]$/;
+
+function lastTextIndex(content: readonly { type: string; text?: string }[]): number {
+  for (let i = content.length - 1; i >= 0; i--) if (content[i]!.type === "text") return i;
+  return -1;
 }
 
-/** Returns a new array; untouched messages are the same object references (cache-friendly). */
+function hasTrailer(content: readonly { type: string; text?: string }[]): boolean {
+  const i = lastTextIndex(content);
+  return i >= 0 && TRAILER_TAIL_RE.test(content[i]!.text ?? "");
+}
+
+/**
+ * Returns a new array; untouched messages are the same object references (cache-friendly).
+ * The trailer is appended to the *last text block* rather than added as a new block, so
+ * extensions that classify tool results by block shape (e.g. SoL-Pi ObservationPack's
+ * "every block is text") see the same shape, and a later projection that replaces the
+ * content wholesale (a placeholder) can be re-tagged by running this again after it.
+ */
 export function addTrailers(messages: readonly AgentMessage[], idIndex: ReadonlyMap<string, string>): AgentMessage[] {
   return messages.map((m) => {
     if (m.role !== "user" && m.role !== "toolResult") return m;
     const id = idIndex.get(keyOf(m as Key));
     if (!id) return m;
     if (typeof m.content === "string") {
-      return { ...m, content: [{ type: "text", text: m.content }, { type: "text", text: trailerFor(id) }] } as AgentMessage;
+      return { ...m, content: [{ type: "text", text: `${m.content}\n${trailerFor(id)}` }] } as AgentMessage;
     }
     if (hasTrailer(m.content)) return m;
-    return { ...m, content: [...m.content, { type: "text", text: trailerFor(id) }] } as AgentMessage;
+    const i = lastTextIndex(m.content);
+    if (i < 0) return { ...m, content: [...m.content, { type: "text", text: trailerFor(id) }] } as AgentMessage;
+    const content = m.content.slice();
+    const block = content[i] as { type: "text"; text: string };
+    content[i] = { ...block, text: `${block.text}\n${trailerFor(id)}` };
+    return { ...m, content } as AgentMessage;
   });
 }

@@ -19,6 +19,8 @@ export interface Config {
   externalCompactionModels: string[];
   historyReadMaxChars: number;
   entryIdTrailers: boolean;
+  /** Host schedules a rollover after a notes write when the gate passes (no new_context call needed). */
+  autoRollover: boolean;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -31,6 +33,7 @@ export const DEFAULT_CONFIG: Config = {
   externalCompactionModels: [],
   historyReadMaxChars: 12_000,
   entryIdTrailers: true,
+  autoRollover: true,
 };
 
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
@@ -61,6 +64,7 @@ export function parseConfig(raw: unknown): Config {
     externalCompactionModels: Array.isArray(r["externalCompactionModels"]) ? r["externalCompactionModels"].filter((x): x is string => typeof x === "string") : [],
     historyReadMaxChars: num(r["historyReadMaxChars"], DEFAULT_CONFIG.historyReadMaxChars, 500),
     entryIdTrailers: typeof r["entryIdTrailers"] === "boolean" ? r["entryIdTrailers"] : DEFAULT_CONFIG.entryIdTrailers,
+    autoRollover: typeof r["autoRollover"] === "boolean" ? r["autoRollover"] : DEFAULT_CONFIG.autoRollover,
   };
 }
 
