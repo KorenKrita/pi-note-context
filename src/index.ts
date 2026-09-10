@@ -5,7 +5,7 @@
  * host fallback, branch-state reset.
  */
 
-import { SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { loadConfig, type Config } from "./config.ts";
 import { evaluateGate, projectCut } from "./gate.ts";
@@ -30,9 +30,13 @@ import { droppedRange, makeDetails, pinUserMessages, renderRolloverSummary, type
 import { renderStatusLine, STATUS_CUSTOM_TYPE, turnsSince } from "./status.ts";
 import { addTrailers, buildIdIndex } from "./trailers.ts";
 
-type ToolOut = { content: { type: "text"; text: string }[]; details: Record<string, unknown>; isError?: boolean };
-function text(msg: string, details: Record<string, unknown> = {}, isError = false): ToolOut {
-  return { content: [{ type: "text", text: msg }], details, ...(isError ? { isError: true } : {}) };
+type ToolOut = { content: { type: "text"; text: string }[]; details: Record<string, unknown> };
+function text(msg: string, details: Record<string, unknown> = {}): ToolOut {
+  return { content: [{ type: "text", text: msg }], details };
+}
+/** Pi turns a thrown error into an error tool result; a returned `isError` flag is ignored by agent-core. */
+function fail(msg: string): never {
+  throw new Error(msg);
 }
 
 const NotesParams = Type.Object({
@@ -48,10 +52,11 @@ const HistoryParams = Type.Object({
   list: Type.Optional(Type.Boolean({ description: "Chronological listing." })),
   window: Type.Optional(Type.Integer({ minimum: 1, description: "Restrict to one context window number." })),
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-  offset: Type.Optional(Type.Integer({ minimum: 0 })),
+  offset: Type.Optional(Type.Integer({ minimum: 0, description: "list: entries to skip. query: matching entries to skip. id: character offset into the entry text." })),
 });
 
 const NewContextParams = Type.Object({});
+const MAINTENANCE_CUSTOM_TYPE = "note-context/maintenance";
 
 export default function noteContext(pi: ExtensionAPI): void {
   const config: Config = loadConfig();
@@ -65,6 +70,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   let maintenance: MaintenanceState = { kind: "idle" };
   let attemptCounter = 0;
   let reminderShownForWindow: number | null = null;
+  let maintenanceExhaustedForWindow: number | null = null;
   let lastRolloverLeafId: string | null = null; // for "turns since rollover" in history ledger rows
   let lastCompactionWasOurs = false;
 
@@ -74,12 +80,15 @@ export default function noteContext(pi: ExtensionAPI): void {
     inFlightRollover = null;
     maintenance = { kind: "idle" };
     reminderShownForWindow = null;
+    maintenanceExhaustedForWindow = null;
     lastRolloverLeafId = null;
     lastCompactionWasOurs = false;
   };
 
   // ------------------------------------------------------------------ helpers
   const branchOf = (ctx: ExtensionContext) => ctx.sessionManager.getBranch();
+  /** Compaction-aware active context entries: what the model actually sees (and what the next compaction can drop). */
+  const contextOf = (ctx: ExtensionContext) => ctx.sessionManager.buildContextEntries();
   const notebookOf = (ctx: ExtensionContext): Notebook => reconstructNotebook(branchOf(ctx));
   const sessionId = (ctx: ExtensionContext) => ctx.sessionManager.getSessionId();
   const modelKey = (ctx: ExtensionContext) => (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null);
@@ -98,20 +107,22 @@ export default function noteContext(pi: ExtensionAPI): void {
   }
 
   const DEFAULT_COMPACTION = { keepRecentTokens: 20_000, reserveTokens: 16_384, enabled: true };
-  let settingsCache: { cwd: string; value: typeof DEFAULT_COMPACTION } | null = null;
-  /** The user's real compaction settings (global + project), so gate projection matches Pi's cut. */
-  function compactionSettings(ctx?: ExtensionContext): typeof DEFAULT_COMPACTION {
-    const cwd = ctx?.cwd ?? process.cwd();
-    if (settingsCache && settingsCache.cwd === cwd) return settingsCache.value;
+  let settingsCache: { key: string; value: typeof DEFAULT_COMPACTION } | null = null;
+  /** The user's real compaction settings (global + project, honouring Pi's project-trust decision), so gate projection matches Pi's cut. */
+  function compactionSettings(ctx: ExtensionContext): typeof DEFAULT_COMPACTION {
+    const cwd = ctx.cwd;
+    const trusted = ctx.isProjectTrusted();
+    const key = `${cwd}|${trusted}`;
+    if (settingsCache && settingsCache.key === key) return settingsCache.value;
     try {
-      const sm = SettingsManager.create(cwd, process.env["PI_CODING_AGENT_DIR"]);
+      const sm = SettingsManager.create(cwd, process.env["PI_CODING_AGENT_DIR"], { projectTrusted: trusted });
       const c = sm.getCompactionSettings();
       const value = {
         keepRecentTokens: c.keepRecentTokens ?? DEFAULT_COMPACTION.keepRecentTokens,
         reserveTokens: c.reserveTokens ?? DEFAULT_COMPACTION.reserveTokens,
         enabled: c.enabled ?? DEFAULT_COMPACTION.enabled,
       };
-      settingsCache = { cwd, value };
+      settingsCache = { key, value };
       return value;
     } catch {
       return DEFAULT_COMPACTION;
@@ -134,10 +145,18 @@ export default function noteContext(pi: ExtensionAPI): void {
   }
 
   function summaryTokenEstimate(ctx: ExtensionContext, notebook: Notebook): number {
-    const branch = branchOf(ctx);
-    const cut = projectCut(branch, compactionSettings(ctx).keepRecentTokens);
-    const pinned = cut.firstKeptEntryId ? pinUserMessages(droppedRange(branch, cut.firstKeptEntryId), config.pin) : [];
-    return estimateText(renderRolloverSummary({ window: currentWindow(branch) + 1, reason: "model", notebook, pinned }));
+    const context = contextOf(ctx);
+    const cut = projectCut(context, compactionSettings(ctx).keepRecentTokens);
+    const pinned = cut.firstKeptEntryId ? pinUserMessages(droppedRange(context, cut.firstKeptEntryId), config.pin) : [];
+    return estimateText(renderRolloverSummary({ window: currentWindow(branchOf(ctx)) + 1, reason: "model", notebook, pinned }));
+  }
+
+  /** Freshness against a concrete cut: true when nothing that will be dropped post-dates the notebook's review marker. */
+  function freshAgainstCut(context: readonly SessionEntry[], notebook: Notebook, firstKeptEntryId: string): boolean {
+    const cutIdx = context.findIndex((e) => e.id === firstKeptEntryId);
+    if (cutIdx <= 0) return true;
+    const reviewedIdx = notebook.reviewedThrough ? context.findIndex((e) => e.id === notebook.reviewedThrough) : -1;
+    return reviewedIdx >= cutIdx - 1;
   }
 
   // ------------------------------------------------------------------- notes
@@ -167,7 +186,10 @@ export default function noteContext(pi: ExtensionAPI): void {
       };
 
       if (params.reviewed && !hasSections) {
-        if (current.revision === 0) return text("Nothing to review: the notebook is empty. Write sections first.", {}, true);
+        if (current.revision === 0) {
+          onNotesFailed(ctx, "nothing to review: the notebook is empty");
+          return fail("Nothing to review: the notebook is empty. Write sections first.");
+        }
         const record = commitReview();
         return text(`Notebook revision ${record.revision}: reviewed, unchanged.`, { revision: record.revision, reviewOnly: true });
       }
@@ -176,7 +198,7 @@ export default function noteContext(pi: ExtensionAPI): void {
       if (!result.ok) {
         appendLedger({ kind: "notes_rejected", session: sessionId(ctx), window, reason: result.reason });
         onNotesFailed(ctx, `${result.reason}: ${result.detail}`);
-        return text(`notes rejected (${result.reason}): ${result.detail}`, { reason: result.reason }, true);
+        return fail(`notes rejected (${result.reason}): ${result.detail}`);
       }
       if (!result.changed && !params.replaceAll) {
         const record = commitReview();
@@ -208,17 +230,17 @@ export default function noteContext(pi: ExtensionAPI): void {
       const items = indexBranch(branch);
       const window = currentWindow(branch);
       const modes = [params.query !== undefined, params.id !== undefined, params.list === true].filter(Boolean).length;
-      if (modes !== 1) return text("history: pass exactly one of query, id, or list:true.", {}, true);
+      if (modes !== 1) return fail("history: pass exactly one of query, id, or list:true.");
       const since = turnsSinceRollover(ctx);
       if (params.id !== undefined) {
         const r = read(items, params.id, params.context ?? 1);
         appendLedger({ kind: "history", session: sessionId(ctx), window, mode: "read", hits: r ? 1 : 0, turnsSinceRollover: since });
-        if (!r) return text(`history: no model-visible entry with id ${params.id} on this branch.`, {}, true);
-        return text(renderRead(r, config.historyReadMaxChars), { id: r.target.id, window: r.target.window });
+        if (!r) return fail(`history: no model-visible entry with id ${params.id} on this branch.`);
+        return text(renderRead(r, { offset: params.offset ?? 0, maxChars: config.historyReadMaxChars }), { id: r.target.id, window: r.target.window, offset: params.offset ?? 0, totalChars: r.target.text.length });
       }
       if (params.query !== undefined) {
-        if (params.query.length === 0) return text("history: query must be non-empty.", {}, true);
-        const opts = { query: params.query, window: params.window, limit: params.limit };
+        if (params.query.length === 0) return fail("history: query must be non-empty.");
+        const opts = { query: params.query, window: params.window, limit: params.limit, offset: params.offset };
         const r = search(items, opts);
         appendLedger({ kind: "history", session: sessionId(ctx), window, mode: "search", hits: r.hits.length, turnsSinceRollover: since });
         return text(renderSearch(r, opts), { hits: r.hits.length, scanned: r.scanned, truncated: r.truncated });
@@ -243,13 +265,13 @@ export default function noteContext(pi: ExtensionAPI): void {
       const window = currentWindow(branch);
       if (externalOwner(ctx)) {
         // Owner produces the summary; we only validate that notes exist and schedule.
-        if (notebook.revision === 0) return text("no notebook on this branch — write notes first.", { blocker: "no_notebook" }, true);
+        if (notebook.revision === 0) return fail("no notebook on this branch — write notes first.");
         pendingRollover = { reason: "model", requestedAtLeaf: ctx.sessionManager.getLeafId() };
         appendLedger({ kind: "gate", session: sessionId(ctx), window, ok: true });
         return text(`rollover scheduled (external compaction owner for ${modelKey(ctx)}): window #${window} → #${window + 1} at the end of this turn. End the turn now without further tool calls.`, { external: true });
       }
       const verdict = evaluateGate({
-        branch,
+        branch: contextOf(ctx),
         notebook,
         settings: { keepRecentTokens: compactionSettings(ctx).keepRecentTokens },
         minReclaimTokens: config.minReclaimTokens,
@@ -257,7 +279,7 @@ export default function noteContext(pi: ExtensionAPI): void {
         summaryTokens: summaryTokenEstimate(ctx, notebook),
       });
       appendLedger({ kind: "gate", session: sessionId(ctx), window, ok: verdict.ok, ...(verdict.ok ? { reclaim: verdict.reclaimTokens } : { blocker: verdict.blocker, reclaim: verdict.reclaimTokens }) });
-      if (!verdict.ok) return text(`new_context refused: ${verdict.message}`, { blocker: verdict.blocker }, true);
+      if (!verdict.ok) return fail(`new_context refused: ${verdict.message}`);
       pendingRollover = { reason: "model", requestedAtLeaf: ctx.sessionManager.getLeafId() };
       return text(
         `rollover scheduled: window #${window} → #${window + 1} at the end of this turn (~${Math.round(verdict.reclaimTokens / 1000)}K tokens reclaimed, ${verdict.droppedEntries} entries leave the window). End the turn now without further tool calls.`,
@@ -296,16 +318,29 @@ export default function noteContext(pi: ExtensionAPI): void {
     const window = currentWindow(branchOf(ctx));
     if (r.action === "steer_repair" && maintenance.kind === "requested") {
       appendLedger({ kind: "maintenance", session: sessionId(ctx), window, action: "steer_repair", attempt: maintenance.attempt });
-      pi.sendMessage({ customType: "note-context/maintenance", content: maintenanceRequestText(maintenance.attempt, error), display: true }, { deliverAs: "steer" });
+      pi.sendMessage({ customType: MAINTENANCE_CUSTOM_TYPE, content: maintenanceRequestText(maintenance.attempt, error), display: true, details: { attempt: maintenance.attempt } }, { deliverAs: "steer" });
     } else if (r.action === "give_up") {
       appendLedger({ kind: "maintenance", session: sessionId(ctx), window, action: "give_up", attempt: 0 });
+      // Hand off: no more maintenance attempts this window; Pi's threshold compaction runs its
+      // LLM summary (session_before_compact declines the template on a stale notebook).
+      maintenanceExhaustedForWindow = window;
     }
   }
 
   // ---------------------------------------------------- dispatch guard (§6)
-  pi.on("tool_call", async (event) => {
+  pi.on("tool_call", async (event, ctx) => {
     if (maintenance.kind !== "requested") return undefined;
     if (event.toolName === "notes") return undefined;
+    // The model is not cooperating with the checkpoint request. Bound the guard: after a few
+    // blocked calls hand off to Pi's own threshold compaction instead of stalling the task.
+    const r = step(maintenance, { type: "blocked_call" }, () => ++attemptCounter);
+    maintenance = r.state;
+    if (r.action === "give_up") {
+      const window = currentWindow(branchOf(ctx));
+      appendLedger({ kind: "maintenance", session: sessionId(ctx), window, action: "give_up_uncooperative", attempt: 0 });
+      maintenanceExhaustedForWindow = window;
+      return undefined; // let this call through; guard is lifted for the window
+    }
     return { block: true, reason: "context maintenance in progress — only `notes` is available until the checkpoint lands." };
   });
 
@@ -315,26 +350,28 @@ export default function noteContext(pi: ExtensionAPI): void {
     if (event.customInstructions) return undefined; // user-directed /compact: Pi's LLM summary
     if (externalOwner(ctx)) return undefined; // another extension owns compaction for this model
     const branch = branchOf(ctx);
+    const context = contextOf(ctx);
     const notebook = reconstructNotebook(branch);
     const window = currentWindow(branch);
     if (notebook.revision === 0) {
       appendLedger({ kind: "rollover_declined", session: sessionId(ctx), window, why: "no_notebook" });
       return undefined; // never template-rollover without a notebook (§6 step 4)
     }
-    const requested = inFlightRollover ?? pendingRollover;
-    const reason: RolloverReason = requested?.reason ?? (event.reason === "manual" ? "model" : "threshold");
-    if (!requested && event.reason !== "manual") {
-      // Threshold/overflow reached without a model request. Our notebook exists, so a
-      // template rollover is still better than an LLM summary — but only if the notebook
-      // is not stale relative to what will be dropped. Otherwise let Pi summarise.
-      const cutIdx = branch.findIndex((e) => e.id === event.preparation.firstKeptEntryId);
-      const reviewedIdx = notebook.reviewedThrough ? branch.findIndex((e) => e.id === notebook.reviewedThrough) : -1;
-      if (cutIdx > 0 && reviewedIdx < cutIdx - 1) {
-        appendLedger({ kind: "rollover_declined", session: sessionId(ctx), window, why: "stale_notebook_at_threshold" });
-        return undefined;
-      }
+    // Freshness against the *actual* cut, for every trigger: the gate's projection may be
+    // stale by the time compaction runs, and manual /compact never went through the gate.
+    if (!freshAgainstCut(context, notebook, event.preparation.firstKeptEntryId)) {
+      appendLedger({ kind: "rollover_declined", session: sessionId(ctx), window, why: "stale_notebook_at_cut" });
+      return undefined;
     }
-    const dropped = droppedRange(branch, event.preparation.firstKeptEntryId);
+    // Pi's automatic compaction can fire mid-run (before the next assistant response). A
+    // template rollover there would drop context the model is actively working from; the
+    // only in-flight path we accept is our own ctx.compact(), which aborted the run first.
+    if (inFlightRollover === null && event.reason !== "manual" && !ctx.isIdle()) {
+      appendLedger({ kind: "rollover_declined", session: sessionId(ctx), window, why: "auto_compaction_mid_run" });
+      return undefined;
+    }
+    const reason: RolloverReason = inFlightRollover?.reason ?? (event.reason === "manual" ? "model" : "threshold");
+    const dropped = droppedRange(context, event.preparation.firstKeptEntryId);
     const pinned = pinUserMessages(dropped, config.pin);
     const summary = renderRolloverSummary({ window: window + 1, reason, notebook, pinned });
     const details = makeDetails(window + 1, reason, notebook, pinned);
@@ -351,6 +388,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     inFlightRollover = null;
     maintenance = step(maintenance, { type: "rollover_done" }, () => attemptCounter).state;
     reminderShownForWindow = null;
+    maintenanceExhaustedForWindow = null;
     lastCompactionWasOurs = false;
   });
   pi.on("session_compact_failed", async () => {
@@ -393,11 +431,12 @@ export default function noteContext(pi: ExtensionAPI): void {
     const notebook = reconstructNotebook(branch);
     const window = currentWindow(branch);
     if (zone === "fallback") {
+      if (maintenanceExhaustedForWindow === window) return;
       const r = step(maintenance, { type: "enter", notebookRevision: notebook.revision }, () => ++attemptCounter);
       maintenance = r.state;
       if (r.action === "steer_request" && maintenance.kind === "requested") {
         appendLedger({ kind: "maintenance", session: sessionId(ctx), window, action: "steer_request", attempt: maintenance.attempt });
-        pi.sendMessage({ customType: "note-context/maintenance", content: maintenanceRequestText(maintenance.attempt), display: true }, { deliverAs: "steer" });
+        pi.sendMessage({ customType: MAINTENANCE_CUSTOM_TYPE, content: maintenanceRequestText(maintenance.attempt), display: true, details: { attempt: maintenance.attempt } }, { deliverAs: "steer" });
       }
       return;
     }
@@ -417,7 +456,19 @@ export default function noteContext(pi: ExtensionAPI): void {
   pi.on("context", async (event, ctx) => {
     const branch = branchOf(ctx);
     const notebook = reconstructNotebook(branch);
-    let messages = event.messages.filter((m) => !(m.role === "custom" && m.customType === STATUS_CUSTOM_TYPE));
+    const activeAttempt = maintenance.kind === "requested" ? maintenance.attempt : null;
+    let messages = event.messages
+      .filter((m) => !(m.role === "custom" && m.customType === STATUS_CUSTOM_TYPE))
+      .map((m) => {
+        // A maintenance instruction is imperative; once its attempt is no longer active it must
+        // not survive in the retained tail as a live command.
+        if (m.role === "custom" && m.customType === MAINTENANCE_CUSTOM_TYPE) {
+          const attempt = (m.details as { attempt?: number } | undefined)?.attempt;
+          if (attempt !== undefined && attempt === activeAttempt) return m;
+          return { ...m, content: `[note-context] (earlier maintenance request #${attempt ?? "?"} — completed; no action required)` };
+        }
+        return m;
+      });
     if (config.entryIdTrailers) messages = addTrailers(messages, buildIdIndex(branch));
     const line = renderStatusLine({
       window: currentWindow(branch),

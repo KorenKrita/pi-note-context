@@ -67,6 +67,14 @@ describe("applySections", () => {
     expect(!r.ok && r.reason).toBe("invalid_section_name");
   });
 
+  test("prototype-named sections are stored, not silently dropped", () => {
+    const r = applySections({}, { sections: { constructor: "critical constraint", toString: "x", Task: "t" } });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(Object.keys(r.sections)).toEqual(["Task", "constructor", "toString"]);
+    expect(r.sections["constructor"]).toBe("critical constraint");
+  });
+
   test("reports changed=false for a no-op write", () => {
     const r = applySections({ Task: "t" }, { sections: { Task: "t" } });
     expect(r.ok && r.changed).toBe(false);

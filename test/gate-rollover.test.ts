@@ -54,10 +54,14 @@ describe("gate", () => {
     expect(!v2.ok && v2.blocker).toBe("already_pending");
   });
 
-  test("window start is the entry after the last compaction", () => {
-    const branch: SessionEntry[] = [user("u1", "a"), ...round(1, 30), rolloverEntry("r1", "a1", 2), notebookEntry("n2", 2, { Task: "t" }, "a1"), ...round(2, 1)];
-    const cut = projectCut(branch, KEEP);
-    expect(cut.start).toBe(branch.findIndex((e) => e.id === "r1") + 1);
+  test("context entries: droppable range starts after the leading compaction entry and includes its retained tail", () => {
+    // buildContextEntries() shape: [compaction, ...retained tail, ...newer]
+    const context: SessionEntry[] = [rolloverEntry("r1", "t8", 2), ...round(8, 60), ...round(9, 60), notebookEntry("n2", 2, { Task: "t" }, "a9"), ...round(10, 1)];
+    const cut = projectCut(context, KEEP);
+    expect(cut.start).toBe(1);
+    const v = evaluateGate({ branch: context, notebook: reconstructNotebook(context), settings: { keepRecentTokens: KEEP }, minReclaimTokens: 1, pending: false, summaryTokens: 10 });
+    // the ~120 KB retained tail is droppable even though it predates the current window's new work
+    expect(v.ok && v.droppedEntries).toBeGreaterThan(0);
   });
 });
 
@@ -88,10 +92,12 @@ describe("rollover summary", () => {
     expect(pinned[2]?.text).toBe("third");
   });
 
-  test("droppedRange stops at the previous compaction boundary", () => {
-    const branch: SessionEntry[] = [user("u0", "old"), rolloverEntry("r1", "u0", 2), user("u1", "new task"), ...round(1, 1), toolResult("tk", "cx", "read", "kept")];
-    const dropped = droppedRange(branch, "tk");
-    expect(dropped.map((e) => e.id)).toEqual(["u1", "a1", "t1"]);
+  test("droppedRange spans the previous compaction's retained tail and excludes the compaction entry itself", () => {
+    const context: SessionEntry[] = [rolloverEntry("r1", "u0", 2), user("u0", "retained correction: skip Windows"), user("u1", "new task"), ...round(1, 1), toolResult("tk", "cx", "read", "kept")];
+    const dropped = droppedRange(context, "tk");
+    expect(dropped.map((e) => e.id)).toEqual(["u0", "u1", "a1", "t1"]);
+    // and the retained correction is pinned, not lost
+    expect(pinUserMessages(dropped).map((p) => p.id)).toEqual(["u0", "u1"]);
   });
 
   test("a rollover entry is visible in history as a window boundary", () => {

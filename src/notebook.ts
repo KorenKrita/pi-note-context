@@ -93,7 +93,7 @@ export function applySections(current: Record<string, string>, input: ApplyInput
       return { ok: false, reason: "invalid_section_name", detail: `section name "${name}" must match ${SECTION_NAME}` };
     }
   }
-  const next: Record<string, string> = input.replaceAll ? {} : { ...current };
+  const next: Record<string, string> = Object.assign(Object.create(null), input.replaceAll ? {} : current);
   for (const [name, text] of Object.entries(input.sections)) {
     const trimmed = text.trim();
     if (trimmed.length === 0) delete next[name];
@@ -117,27 +117,30 @@ export function applySections(current: Record<string, string>, input: ApplyInput
       detail: `notebook would be ${size.bytes} bytes / ~${size.tokensEstimate} tokens; limit ${limits.maxBytes} bytes / ${limits.maxTokens} tokens (over by ${overBytes} bytes / ${overTokens} tokens). Previous revision kept. Prune and add in one call.`,
     };
   }
-  const changed = !sameSections(current, next);
-  return { ok: true, sections: orderSections(next), size, changed };
+  const ordered = orderSections(next);
+  if (Object.keys(ordered).length !== names.length) {
+    return { ok: false, reason: "invalid_section_name", detail: "a section name collided during ordering; choose a different name" };
+  }
+  const changed = !sameSections(current, ordered);
+  return { ok: true, sections: ordered, size, changed };
 }
 
 function sameSections(a: Record<string, string>, b: Record<string, string>): boolean {
   const ak = Object.keys(a);
   const bk = Object.keys(b);
   if (ak.length !== bk.length) return false;
-  for (const k of ak) if (a[k] !== b[k]) return false;
+  for (const k of ak) if (!Object.hasOwn(b, k) || a[k] !== b[k]) return false;
   return true;
 }
 
 /** Canonical sections first in canonical order, then custom sections in insertion order. */
 export function orderSections(sections: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
+  const out: Record<string, string> = Object.create(null);
   for (const name of CANONICAL_SECTIONS) {
-    const v = sections[name];
-    if (v !== undefined) out[name] = v;
+    if (Object.hasOwn(sections, name)) out[name] = sections[name]!;
   }
   for (const [name, v] of Object.entries(sections)) {
-    if (!(name in out)) out[name] = v;
+    if (!Object.hasOwn(out, name)) out[name] = v;
   }
   return out;
 }
@@ -170,7 +173,7 @@ export function reconstructNotebook(branch: readonly BranchEntryLike[]): Noteboo
     const e = branch[i]!;
     if (e.type !== "custom" || e.customType !== NOTEBOOK_ENTRY_TYPE) continue;
     if (!isNotebookRecord(e.data)) continue;
-    return { revision: e.data.revision, sections: orderSections(e.data.sections), reviewedThrough: e.data.reviewedThrough, entryId: e.id };
+    return { revision: e.data.revision, sections: orderSections(Object.assign(Object.create(null), e.data.sections)), reviewedThrough: e.data.reviewedThrough, entryId: e.id };
   }
   return EMPTY_NOTEBOOK;
 }

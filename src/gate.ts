@@ -8,6 +8,7 @@ import { findCutPoint, estimateTokens, sessionEntryToContextMessages, type Compa
 import type { Notebook } from "./notebook.ts";
 
 export interface GateInput {
+  /** Compaction-aware active context entries (ctx.sessionManager.buildContextEntries()): latest compaction entry, its retained tail, then newer entries. */
   branch: readonly SessionEntry[];
   notebook: Notebook;
   settings: Required<Pick<CompactionSettings, "keepRecentTokens">>;
@@ -21,10 +22,15 @@ export type GateVerdict =
   | { ok: true; firstKeptEntryId: string; reclaimTokens: number; droppedEntries: number }
   | { ok: false; blocker: "already_pending" | "no_notebook" | "stale_notebook" | "nothing_to_drop" | "low_reclaim"; message: string; reclaimTokens?: number };
 
-/** Index of the first entry after the latest compaction on the branch (window start). */
-export function windowStartIndex(branch: readonly SessionEntry[]): number {
-  for (let i = branch.length - 1; i >= 0; i--) if (branch[i]!.type === "compaction") return i + 1;
-  return 0;
+/**
+ * Index where the droppable range starts inside the active context entries.
+ * `buildContextEntries()` places the latest compaction entry first, followed by
+ * the entries it retained and everything newer; all of those are droppable by
+ * the next compaction, so the range starts right after the compaction entry.
+ * Without a compaction the whole context is droppable.
+ */
+export function windowStartIndex(context: readonly SessionEntry[]): number {
+  return context[0]?.type === "compaction" ? 1 : 0;
 }
 
 export function projectCut(branch: readonly SessionEntry[], keepRecentTokens: number): { firstKeptEntryId: string | null; firstKeptIndex: number; start: number } {

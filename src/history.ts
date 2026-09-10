@@ -64,7 +64,7 @@ function toItem(e: SessionEntry, window: number): HistoryItem | null {
           const parts: string[] = [];
           for (const c of m.content) {
             if (c.type === "text") parts.push(c.text);
-            else if (c.type === "toolCall") parts.push(`${c.name}(${safeJson(c.arguments)})`);
+            else if (c.type === "toolCall") parts.push(`${c.name}(${fullJson(c.arguments)})`);
             // thinking blocks intentionally excluded
           }
           const text = parts.join("\n");
@@ -109,10 +109,9 @@ function firstLine(s: string): string {
   return line.length > 120 ? `${line.slice(0, 117)}…` : line;
 }
 
-function safeJson(v: unknown): string {
+function fullJson(v: unknown): string {
   try {
-    const s = JSON.stringify(v);
-    return s.length > 400 ? `${s.slice(0, 397)}…` : s;
+    return JSON.stringify(v);
   } catch {
     return "[unserializable]";
   }
@@ -126,6 +125,8 @@ export interface SearchOptions {
   query: string;
   window?: number;
   limit?: number;
+  /** Number of matching entries to skip (pagination). */
+  offset?: number;
   snippetChars?: number;
 }
 
@@ -152,11 +153,16 @@ export function search(items: readonly HistoryItem[], opts: SearchOptions): Sear
   const hits: SearchHit[] = [];
   let scanned = 0;
   let truncated = false;
+  let skip = Math.max(0, opts.offset ?? 0);
   for (const it of items) {
     if (opts.window !== undefined && it.window !== opts.window) continue;
     scanned++;
     const idx = it.text.indexOf(q);
     if (idx < 0) continue;
+    if (skip > 0) {
+      skip--;
+      continue;
+    }
     if (hits.length >= limit) {
       truncated = true;
       break;
@@ -198,6 +204,12 @@ export function read(items: readonly HistoryItem[], id: string, context = 1): Re
   };
 }
 
+export interface ReadPage {
+  /** Zero-based character offset into the target text. */
+  offset: number;
+  maxChars: number;
+}
+
 export interface ListOptions {
   window?: number;
   limit?: number;
@@ -217,17 +229,24 @@ export function list(items: readonly HistoryItem[], opts: ListOptions = {}): { i
 // ---------------------------------------------------------------------------
 
 export function renderSearch(r: SearchResult, opts: SearchOptions): string {
-  const head = `history search "${opts.query}"${opts.window !== undefined ? ` window #${opts.window}` : ""}: ${r.hits.length} hit${r.hits.length === 1 ? "" : "s"} in ${r.scanned} entries${r.truncated ? " (more hits beyond limit)" : ""}`;
+  const off = opts.offset ?? 0;
+  const head = `history search "${opts.query}"${opts.window !== undefined ? ` window #${opts.window}` : ""}: ${r.hits.length} hit${r.hits.length === 1 ? "" : "s"}${off ? ` (from #${off + 1})` : ""} in ${r.scanned} entries${r.truncated ? ` — more hits: repeat with offset: ${off + r.hits.length}` : ""}`;
   if (r.hits.length === 0) return head;
   const lines = r.hits.map((h) => `- [history entry=${h.id}] w${h.window} ${h.role} · ${h.label}\n  ${h.snippet}${h.moreMatches ? ` (+${h.moreMatches} more)` : ""}`);
   return `${head}\n${lines.join("\n")}`;
 }
 
-export function renderRead(r: ReadResult, maxChars: number): string {
+export function renderRead(r: ReadResult, page: ReadPage): string {
   const parts: string[] = [];
-  for (const b of r.before) parts.push(`--- before: [history entry=${b.id}] ${b.role} · ${b.label}\n${clip(b.text, Math.floor(maxChars / 4))}`);
-  parts.push(`=== [history entry=${r.target.id}] window #${r.target.window} ${r.target.role} · ${r.target.label} · ${r.target.timestamp}\n${clip(r.target.text, maxChars)}`);
-  for (const a of r.after) parts.push(`--- after: [history entry=${a.id}] ${a.role} · ${a.label}\n${clip(a.text, Math.floor(maxChars / 4))}`);
+  const t = r.target.text;
+  const start = Math.min(Math.max(0, page.offset), t.length);
+  const end = Math.min(t.length, start + page.maxChars);
+  const neighbourBudget = Math.floor(page.maxChars / 4);
+  if (start === 0) for (const b of r.before) parts.push(`--- before: [history entry=${b.id}] ${b.role} · ${b.label}\n${clip(b.text, neighbourBudget)}`);
+  const range = t.length > page.maxChars ? ` · chars ${start}–${end} of ${t.length}` : "";
+  parts.push(`=== [history entry=${r.target.id}] window #${r.target.window} ${r.target.role} · ${r.target.label} · ${r.target.timestamp}${range}\n${t.slice(start, end)}`);
+  if (end < t.length) parts.push(`…[${t.length - end} more chars — continue with history({ id: "${r.target.id}", offset: ${end} })]`);
+  if (end >= t.length) for (const a of r.after) parts.push(`--- after: [history entry=${a.id}] ${a.role} · ${a.label}\n${clip(a.text, neighbourBudget)}`);
   return parts.join("\n\n");
 }
 
@@ -238,5 +257,5 @@ export function renderList(r: { items: HistoryItem[]; total: number; offset: num
 }
 
 function clip(s: string, max: number): string {
-  return s.length <= max ? s : `${s.slice(0, max)}\n…[${s.length - max} more chars; read with a larger budget or search within]`;
+  return s.length <= max ? s : `${s.slice(0, max)}\n…[${s.length - max} more chars; read this entry by id]`;
 }

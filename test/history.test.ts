@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { currentWindow, indexBranch, list, read, ROLLOVER_DETAILS_KIND, search } from "../src/history.ts";
+import { currentWindow, indexBranch, list, read, renderRead, ROLLOVER_DETAILS_KIND, search } from "../src/history.ts";
 import { NOTEBOOK_ENTRY_TYPE } from "../src/notebook.ts";
 
 const ts = "2026-09-10T00:00:00.000Z";
@@ -94,6 +94,28 @@ describe("queries", () => {
     expect(r?.before.map((i) => i.id)).toEqual(["u1"]);
     expect(r?.after.map((i) => i.id)).toEqual(["r1"]);
     expect(read(items, "nope")).toBeNull();
+  });
+
+  test("long tool-call arguments are fully indexed and long entries page by character offset", () => {
+    const longArg = `${"a".repeat(1000)}UNIQUE_TAIL`;
+    const b: SessionEntry[] = [
+      { ...base("a9"), type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "c9", name: "write", arguments: { path: "f", content: longArg } }], api: "x", provider: "p", model: "m", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "toolUse", timestamp: 0 } },
+      toolResult("t9", "write", "y".repeat(16_000)),
+    ];
+    const its = indexBranch(b);
+    expect(search(its, { query: "UNIQUE_TAIL" }).hits.map((h) => h.id)).toEqual(["a9"]);
+    const r = read(its, "t9", 0)!;
+    const page1 = renderRead(r, { offset: 0, maxChars: 12_000 });
+    const page2 = renderRead(r, { offset: 12_000, maxChars: 12_000 });
+    expect(page1).toContain("chars 0–12000 of 16000");
+    expect(page1).toContain('offset: 12000');
+    expect(page2).toContain("chars 12000–16000 of 16000");
+    expect(page2).not.toContain("more chars");
+    // search pagination
+    const many: SessionEntry[] = Array.from({ length: 5 }, (_, i) => user(`m${i}`, "needle"));
+    const p2 = search(indexBranch(many), { query: "needle", limit: 2, offset: 2 });
+    expect(p2.hits.map((h) => h.id)).toEqual(["m2", "m3"]);
+    expect(p2.truncated).toBe(true);
   });
 
   test("list paginates and filters by window", () => {

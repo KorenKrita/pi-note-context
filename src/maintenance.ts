@@ -5,7 +5,7 @@
 
 export type MaintenanceState =
   | { kind: "idle" }
-  | { kind: "requested"; attempt: number; startedAtRevision: number; repairs: number }
+  | { kind: "requested"; attempt: number; startedAtRevision: number; repairs: number; blocked: number }
   | { kind: "checkpointed"; attempt: number };
 
 export interface Thresholds {
@@ -40,11 +40,14 @@ export function maintenanceRequestText(attempt: number, repairError?: string): s
 }
 
 export const MAX_REPAIRS = 1;
+/** Non-notes tool calls tolerated while a checkpoint is requested before the host hands off to Pi's summary. */
+export const MAX_BLOCKED_CALLS = 3;
 
 export type MaintenanceEvent =
   | { type: "enter"; notebookRevision: number }
   | { type: "notes_ok"; revision: number }
   | { type: "notes_failed" }
+  | { type: "blocked_call" }
   | { type: "rollover_done" }
   | { type: "reset" };
 
@@ -55,7 +58,7 @@ export function step(state: MaintenanceState, ev: MaintenanceEvent, nextAttempt:
       return { state: { kind: "idle" }, action: "none" };
     case "enter":
       if (state.kind !== "idle") return { state, action: "none" };
-      return { state: { kind: "requested", attempt: nextAttempt(), startedAtRevision: ev.notebookRevision, repairs: 0 }, action: "steer_request" };
+      return { state: { kind: "requested", attempt: nextAttempt(), startedAtRevision: ev.notebookRevision, repairs: 0, blocked: 0 }, action: "steer_request" };
     case "notes_ok":
       if (state.kind !== "requested") return { state, action: "none" };
       if (ev.revision <= state.startedAtRevision) return { state, action: "none" };
@@ -64,5 +67,9 @@ export function step(state: MaintenanceState, ev: MaintenanceEvent, nextAttempt:
       if (state.kind !== "requested") return { state, action: "none" };
       if (state.repairs >= MAX_REPAIRS) return { state: { kind: "idle" }, action: "give_up" };
       return { state: { ...state, repairs: state.repairs + 1 }, action: "steer_repair" };
+    case "blocked_call":
+      if (state.kind !== "requested") return { state, action: "none" };
+      if (state.blocked + 1 >= MAX_BLOCKED_CALLS) return { state: { kind: "idle" }, action: "give_up" };
+      return { state: { ...state, blocked: state.blocked + 1 }, action: "none" };
   }
 }

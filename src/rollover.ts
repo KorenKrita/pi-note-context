@@ -41,20 +41,16 @@ function userText(e: SessionEntry): string | null {
 }
 
 /**
- * Entries of the current window that fall before the cut (root→leaf order):
- * from the entry after the last rollover/compaction boundary up to (excluding) firstKeptEntryId.
+ * Active-context entries that the next compaction will drop: everything in the
+ * compaction-aware context (`buildContextEntries()`) before `firstKeptEntryId`,
+ * excluding the leading compaction entry itself. This includes the previous
+ * compaction's retained tail, which Pi keeps in view and will drop next.
  */
-export function droppedRange(branch: readonly SessionEntry[], firstKeptEntryId: string): SessionEntry[] {
-  const cut = branch.findIndex((e) => e.id === firstKeptEntryId);
+export function droppedRange(context: readonly SessionEntry[], firstKeptEntryId: string): SessionEntry[] {
+  const cut = context.findIndex((e) => e.id === firstKeptEntryId);
   if (cut < 0) return [];
-  let start = 0;
-  for (let i = cut - 1; i >= 0; i--) {
-    if (branch[i]!.type === "compaction") {
-      start = i + 1;
-      break;
-    }
-  }
-  return branch.slice(start, cut);
+  const start = context[0]?.type === "compaction" ? 1 : 0;
+  return context.slice(start, cut);
 }
 
 /**

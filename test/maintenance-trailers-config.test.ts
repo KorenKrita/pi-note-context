@@ -32,6 +32,17 @@ describe("maintenance state machine", () => {
     expect(step(r3.state, { type: "rollover_done" }, () => ++n).state.kind).toBe("idle");
   });
 
+  test("blocked non-notes calls are bounded: the third gives up", () => {
+    let n = 0;
+    let s = step({ kind: "idle" }, { type: "enter", notebookRevision: 1 }, () => ++n).state;
+    expect(step(s, { type: "blocked_call" }, () => ++n).action).toBe("none");
+    s = step(s, { type: "blocked_call" }, () => ++n).state;
+    s = step(s, { type: "blocked_call" }, () => ++n).state;
+    const r = step(s, { type: "blocked_call" }, () => ++n);
+    expect(r.action).toBe("give_up");
+    expect(r.state.kind).toBe("idle");
+  });
+
   test("one repair, then give up", () => {
     let n = 0;
     const s = step({ kind: "idle" }, { type: "enter", notebookRevision: 1 }, () => ++n).state;
