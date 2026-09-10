@@ -5,7 +5,7 @@
  * host fallback, branch-state reset.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { loadConfig, type Config } from "./config.ts";
 import { evaluateGate, projectCut } from "./gate.ts";
@@ -97,16 +97,32 @@ export default function noteContext(pi: ExtensionAPI): void {
     return null;
   }
 
-  function compactionSettings(): { keepRecentTokens: number; reserveTokens: number; enabled: boolean } {
-    // Pi exposes settings only through the session; fall back to Pi's documented defaults.
-    return { keepRecentTokens: 20_000, reserveTokens: 16_384, enabled: true };
+  const DEFAULT_COMPACTION = { keepRecentTokens: 20_000, reserveTokens: 16_384, enabled: true };
+  let settingsCache: { cwd: string; value: typeof DEFAULT_COMPACTION } | null = null;
+  /** The user's real compaction settings (global + project), so gate projection matches Pi's cut. */
+  function compactionSettings(ctx?: ExtensionContext): typeof DEFAULT_COMPACTION {
+    const cwd = ctx?.cwd ?? process.cwd();
+    if (settingsCache && settingsCache.cwd === cwd) return settingsCache.value;
+    try {
+      const sm = SettingsManager.create(cwd, process.env["PI_CODING_AGENT_DIR"]);
+      const c = sm.getCompactionSettings();
+      const value = {
+        keepRecentTokens: c.keepRecentTokens ?? DEFAULT_COMPACTION.keepRecentTokens,
+        reserveTokens: c.reserveTokens ?? DEFAULT_COMPACTION.reserveTokens,
+        enabled: c.enabled ?? DEFAULT_COMPACTION.enabled,
+      };
+      settingsCache = { cwd, value };
+      return value;
+    } catch {
+      return DEFAULT_COMPACTION;
+    }
   }
 
   function thresholds(ctx: ExtensionContext): Thresholds {
     const usage = ctx.getContextUsage();
     return {
       contextWindow: usage?.contextWindow ?? ctx.model?.contextWindow ?? 0,
-      reserveTokens: compactionSettings().reserveTokens,
+      reserveTokens: compactionSettings(ctx).reserveTokens,
       leadTokens: config.leadTokens,
       fallbackBufferTokens: config.fallbackBufferTokens,
     };
@@ -119,7 +135,7 @@ export default function noteContext(pi: ExtensionAPI): void {
 
   function summaryTokenEstimate(ctx: ExtensionContext, notebook: Notebook): number {
     const branch = branchOf(ctx);
-    const cut = projectCut(branch, compactionSettings().keepRecentTokens);
+    const cut = projectCut(branch, compactionSettings(ctx).keepRecentTokens);
     const pinned = cut.firstKeptEntryId ? pinUserMessages(droppedRange(branch, cut.firstKeptEntryId), config.pin) : [];
     return estimateText(renderRolloverSummary({ window: currentWindow(branch) + 1, reason: "model", notebook, pinned }));
   }
@@ -235,7 +251,7 @@ export default function noteContext(pi: ExtensionAPI): void {
       const verdict = evaluateGate({
         branch,
         notebook,
-        settings: { keepRecentTokens: compactionSettings().keepRecentTokens },
+        settings: { keepRecentTokens: compactionSettings(ctx).keepRecentTokens },
         minReclaimTokens: config.minReclaimTokens,
         pending: pendingRollover !== null,
         summaryTokens: summaryTokenEstimate(ctx, notebook),
