@@ -12,7 +12,9 @@ Design: [`docs/DESIGN.md`](docs/DESIGN.md). Independent review and responses: [`
 
 ## Status
 
-Steps 1–3 of 4 shipped (see DESIGN.md §13): tools, gated rollover, threshold reminder, host fallback, entry-id trailers, ledger. Step 4 (tuning from real sessions) is ongoing.
+Steps 1–3 of 4 shipped (see DESIGN.md §13) and independently reviewed twice (`docs/review/`): tools, gated rollover, threshold reminder, host fallback with bounded dispatch guard, entry-id trailers, ledger. Step 4 (tuning `leadTokens` / `minReclaimTokens` / section guidance from real sessions) is ongoing.
+
+`/notes` shows the current notebook. Tools are `notes`, `history`, `new_context`.
 
 ## Configuration
 
