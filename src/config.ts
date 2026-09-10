@@ -21,6 +21,8 @@ export interface Config {
   entryIdTrailers: boolean;
   /** Host schedules a rollover after a notes write when the gate passes (no new_context call needed). */
   autoRollover: boolean;
+  /** Pressure is measured against min(contextWindow, budgetTokens): large windows degrade before they fill. */
+  budgetTokens: number;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -34,6 +36,7 @@ export const DEFAULT_CONFIG: Config = {
   historyReadMaxChars: 12_000,
   entryIdTrailers: true,
   autoRollover: true,
+  budgetTokens: 400_000,
 };
 
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
@@ -65,6 +68,7 @@ export function parseConfig(raw: unknown): Config {
     historyReadMaxChars: num(r["historyReadMaxChars"], DEFAULT_CONFIG.historyReadMaxChars, 500),
     entryIdTrailers: typeof r["entryIdTrailers"] === "boolean" ? r["entryIdTrailers"] : DEFAULT_CONFIG.entryIdTrailers,
     autoRollover: typeof r["autoRollover"] === "boolean" ? r["autoRollover"] : DEFAULT_CONFIG.autoRollover,
+    budgetTokens: num(r["budgetTokens"], DEFAULT_CONFIG.budgetTokens, 32_000),
   };
 }
 

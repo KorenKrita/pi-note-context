@@ -129,10 +129,15 @@ export default function noteContext(pi: ExtensionAPI): void {
     }
   }
 
+  /** The scale pressure is read against: the physical window capped at budgetTokens. */
+  function budgetWindow(ctx: ExtensionContext): number {
+    const physical = ctx.getContextUsage()?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+    return physical > 0 ? Math.min(physical, config.budgetTokens) : 0;
+  }
+
   function thresholds(ctx: ExtensionContext): Thresholds {
-    const usage = ctx.getContextUsage();
     return {
-      contextWindow: usage?.contextWindow ?? ctx.model?.contextWindow ?? 0,
+      contextWindow: budgetWindow(ctx),
       reserveTokens: compactionSettings(ctx).reserveTokens,
       leadTokens: config.leadTokens,
       fallbackBufferTokens: config.fallbackBufferTokens,
@@ -501,9 +506,10 @@ export default function noteContext(pi: ExtensionAPI): void {
         return m;
       });
     if (config.entryIdTrailers) messages = addTrailers(messages, buildIdIndex(branch));
+    const physicalUsage = ctx.getContextUsage();
     const line = renderStatusLine({
       window: currentWindow(branch),
-      usage: ctx.getContextUsage(),
+      usage: physicalUsage ? { tokens: physicalUsage.tokens, contextWindow: budgetWindow(ctx), physicalWindow: physicalUsage.contextWindow } : undefined,
       notebook,
       turnsSinceReview: turnsSince(branch, notebook.reviewedThrough),
       branchChanged: branchChangedPending,

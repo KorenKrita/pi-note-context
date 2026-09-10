@@ -102,6 +102,10 @@ describe("status line", () => {
     const empty = renderStatusLine({ window: 1, usage: { tokens: null, contextWindow: 200_000 }, notebook: EMPTY_NOTEBOOK, turnsSinceReview: null, branchChanged: true });
     expect(empty).toBe("[note-context] window #1 · ?/200K · no notes yet · branch changed — verify workspace state");
   });
+  test("status line names the budget scale on large windows", () => {
+    const line = renderStatusLine({ window: 1, usage: { tokens: 142_300, contextWindow: 400_000, physicalWindow: 1_000_000 }, notebook: EMPTY_NOTEBOOK, turnsSinceReview: null });
+    expect(line).toBe("[note-context] window #1 · 142K/400K budget (1M window) · no notes yet");
+  });
   test("formatTokens", () => {
     expect(formatTokens(999)).toBe("999");
     expect(formatTokens(9_500)).toBe("9.5K");

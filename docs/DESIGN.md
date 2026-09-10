@@ -284,3 +284,7 @@ Verified live (Pi 0.85.1, deepseek-v4-flash, model instructed never to call `new
 - **ObservationPack**: compatible. Trailers are appended to the last text block (block count unchanged, so ObservationPack still classifies the result as pure text); when ObservationPack replaces a result with a placeholder, the next `context` pass re-tags it. Load pi-note-context **after** SoL-Pi in `packages` so the re-tag runs last.
 - **Online Context Compact**: do not enable together with this plugin. It maintains a second model-side state (`update_plan`) and compacts via `customInstructions`, which this plugin treats as user-directed and yields to — the notebook snapshot would not enter the summary.
 - **Evidence-Preserving Reducer**: independent, but redundant with notes for the same purpose (turning long logs into conclusions).
+
+## 17. Budget scale (added 2026-09-11)
+
+Pi's own compaction threshold is `contextWindow − reserveTokens`; on a 1M window that is ~984K, far past the point where attention quality has degraded. All pressure logic in this plugin (reminder zone, fallback zone, status line) therefore reads against `min(contextWindow, budgetTokens)` with `budgetTokens` defaulting to 400K. The fallback state machine calls `ctx.compact()` itself, so Pi's physical threshold is never the operative one on large windows. The status line names the scale: `142K/400K budget (1M window)`.

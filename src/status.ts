@@ -10,7 +10,10 @@ export const STATUS_CUSTOM_TYPE = "note-context/status";
 
 export interface UsageLike {
   tokens: number | null;
+  /** Scale pressure is read against (min(physical, budget)). */
   contextWindow: number;
+  /** Physical window when it differs from the budget scale. */
+  physicalWindow?: number;
 }
 
 export interface StatusInput {
@@ -39,7 +42,8 @@ export function renderStatusLine(s: StatusInput): string {
   const parts: string[] = [];
   parts.push(`window #${s.window}${s.window > 1 ? ` (prev #${s.window - 1})` : ""}`);
   if (s.usage && s.usage.contextWindow > 0) {
-    parts.push(`${s.usage.tokens === null ? "?" : formatTokens(s.usage.tokens)}/${formatTokens(s.usage.contextWindow)}`);
+    const scale = s.usage.physicalWindow && s.usage.physicalWindow !== s.usage.contextWindow ? ` budget (${formatTokens(s.usage.physicalWindow)} window)` : "";
+    parts.push(`${s.usage.tokens === null ? "?" : formatTokens(s.usage.tokens)}/${formatTokens(s.usage.contextWindow)}${scale}`);
   }
   if (s.notebook.revision === 0) {
     parts.push("no notes yet");
