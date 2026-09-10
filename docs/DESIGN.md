@@ -99,7 +99,7 @@ The notebook text enters context at:
 2. **Window start** — embedded verbatim in the rollover summary (§5), so recovery does not depend on the plugin being loaded.
 3. **Threshold reminder** — attached to the one-per-window reminder (§6) so the model edits against the current text without a read call.
 
-It is **not** injected on every call. Rationale: Codex does the same (notes are read on demand); constant injection of a 4K-token block across a 200-turn session costs ~800K duplicated input tokens and invalidates the prompt cache on every notebook change. The status line's `reviewed N turns ago` replaces constant presence with visible staleness.
+It is **not** injected on every call. Rationale: constant injection of a 4K-token block across a 200-turn session costs ~800K duplicated input tokens and invalidates the prompt cache on every notebook change. Codex reads notes on demand and instead injects a server-generated `thread_hint` (≤4 KB) once at each new window; oh-my-pi's per-call injection (PR #10893, a three-day local re-implementation of the Codex feature announced with Astra, 2026-09-05→08) is the cheapest way to fill the gap left by having no `thread_hint`, and its PR states no cost or cache impact was measured. Here the snapshot embedded in the rollover summary (§5) plays the `thread_hint` role, and the status line's `reviewed N turns ago` replaces constant presence with visible staleness.
 
 ### 4.3 Entry ids
 
