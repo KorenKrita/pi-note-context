@@ -29,17 +29,21 @@ export interface NotebookRecord {
   reviewedThrough: string | null;
   /** True when this record was produced by `reviewed: true` (no content change). */
   reviewOnly?: boolean;
+  /** Context tokens at the time of this write/review; the status line reads staleness as tokens added since. Absent on records written before this field existed. */
+  reviewedTokens?: number | null;
 }
 
 export interface Notebook {
   revision: number;
   sections: Record<string, string>;
   reviewedThrough: string | null;
+  /** Context tokens when the notebook was last written/reviewed; null when unknown. */
+  reviewedTokens: number | null;
   /** Journal id of the custom entry holding this revision; null for the empty notebook. */
   entryId: string | null;
 }
 
-export const EMPTY_NOTEBOOK: Notebook = { revision: 0, sections: {}, reviewedThrough: null, entryId: null };
+export const EMPTY_NOTEBOOK: Notebook = { revision: 0, sections: {}, reviewedThrough: null, reviewedTokens: null, entryId: null };
 
 export interface SizeReport {
   bytes: number;
@@ -162,6 +166,7 @@ export function isNotebookRecord(data: unknown): data is NotebookRecord {
   if (!d["sections"] || typeof d["sections"] !== "object" || Array.isArray(d["sections"])) return false;
   for (const v of Object.values(d["sections"] as Record<string, unknown>)) if (typeof v !== "string") return false;
   if (d["reviewedThrough"] !== null && typeof d["reviewedThrough"] !== "string") return false;
+  if (d["reviewedTokens"] !== undefined && d["reviewedTokens"] !== null && typeof d["reviewedTokens"] !== "number") return false;
   return true;
 }
 
@@ -174,11 +179,23 @@ export function reconstructNotebook(branch: readonly BranchEntryLike[]): Noteboo
     const e = branch[i]!;
     if (e.type !== "custom" || e.customType !== NOTEBOOK_ENTRY_TYPE) continue;
     if (!isNotebookRecord(e.data)) continue;
-    return { revision: e.data.revision, sections: orderSections(Object.assign(Object.create(null), e.data.sections)), reviewedThrough: e.data.reviewedThrough, entryId: e.id };
+    return {
+      revision: e.data.revision,
+      sections: orderSections(Object.assign(Object.create(null), e.data.sections)),
+      reviewedThrough: e.data.reviewedThrough,
+      reviewedTokens: typeof e.data.reviewedTokens === "number" ? e.data.reviewedTokens : null,
+      entryId: e.id,
+    };
   }
   return EMPTY_NOTEBOOK;
 }
 
-export function makeRecord(prev: Notebook, sections: Record<string, string>, reviewedThrough: string | null, reviewOnly = false): NotebookRecord {
-  return { version: NOTEBOOK_VERSION, revision: prev.revision + 1, sections, reviewedThrough, ...(reviewOnly ? { reviewOnly: true } : {}) };
+export function makeRecord(
+  prev: Notebook,
+  sections: Record<string, string>,
+  reviewedThrough: string | null,
+  reviewOnly = false,
+  reviewedTokens: number | null = null,
+): NotebookRecord {
+  return { version: NOTEBOOK_VERSION, revision: prev.revision + 1, sections, reviewedThrough, reviewedTokens, ...(reviewOnly ? { reviewOnly: true } : {}) };
 }

@@ -83,15 +83,26 @@ Output is bounded by a character budget with pagination.
 
 ## 4. Injection
 
-### 4.1 Status line — every LLM call
+### 4.1 Status line — a suffix on tool results, stepped
 
-Placed after the last completed protocol boundary (never between a tool call and its results, never inside assistant content) as a single custom message:
+One line of facts appended to the last text part of a tool result and persisted with it:
 
 ```
-[note-context] window #2 (prev #1) · 142K/272K · notes rev 7, reviewed 3 turns ago
+[note-context] 142K/400K budget (1M window) · notes rev 7, +52K since review
 ```
 
-Facts only. After a compaction `tokens` is unknown and shown as `?/272K`.
+Facts only: context tokens against the budget scale (§8), notebook revision, and tokens added to the context since the notebook was last written or reviewed (`reviewedTokens`, stored on the notebook record at write time; absent on older records, in which case the clause is omitted). After a compaction `tokens` is unknown and shown as `?/400K`. No window number: the rollover summary (§5) already opens with it, and `history`'s `window` filter needs nothing more.
+
+**Delivery.** `tool_result` handler; never on this plugin's own tool results or on error results. One step size, `statusStepTokens` (default 40K = 10% of the default budget = the smallest reclaim a rollover can make), drives two independent ticks:
+
+- pressure: `floor(tokens / step)` differs from the last delivered reading (either direction);
+- staleness: `floor(tokensSinceReview / step)` ≥ 1 and not yet delivered for this notebook revision — a write or `reviewed: true` re-arms it.
+
+The first reading of a window (session start, after our compaction) and the reading after `/tree` navigation always deliver. A result with no text part leaves the tick armed for the next one. Turns without tool calls carry no reading; the reminder (§6) covers pressure independently.
+
+**Why a suffix and not a trailing message.** The first implementation pushed a fresh `custom` message at the end of every request from the `context` handler. Bisecting 25 installed extensions against a three-tool-call probe showed it was the only one that froze OpenAI Responses `cacheRead` (a constant trailing message froze it too; entry-id trailers did not): each request's prompt was no longer a prefix of the next, so only the system/tools prefix ever hit. The same session cost 50–90K `cacheWrite` per call for the rest of the window. Anthropic's explicit `cache_control` breakpoints were unaffected, which is why the regression went unnoticed. A suffix inside an already-persisted entry replays byte-for-byte; the odometer keeps the count of such suffixes near one per 40K tokens instead of one per call.
+
+**Why tokens and not turns.** The previous `reviewed N turns ago` counted assistant messages, i.e. LLM calls: ten tool calls in one user turn read as ten turns, and the ledger shows sixteen notebook writes across four user turns in one session — the line was driving the very over-writing the guidance forbids. Tokens since review is the quantity a rollover actually loses.
 
 ### 4.2 Notebook — three moments only
 
@@ -101,7 +112,7 @@ The notebook text enters context at:
 2. **Window start** — embedded verbatim in the rollover summary (§5), so recovery does not depend on the plugin being loaded.
 3. **Threshold reminder** — attached to the one-per-window reminder (§6) so the model edits against the current text without a read call.
 
-It is **not** injected on every call. Rationale: constant injection of a 4K-token block across a 200-turn session costs ~800K duplicated input tokens and invalidates the prompt cache on every notebook change. Codex reads notes on demand and instead injects a server-generated `thread_hint` (≤4 KB) once at each new window; oh-my-pi's per-call injection (PR #10893, a three-day local re-implementation of the Codex feature announced with Astra, 2026-09-05→08) is the cheapest way to fill the gap left by having no `thread_hint`, and its PR states no cost or cache impact was measured. Here the snapshot embedded in the rollover summary (§5) plays the `thread_hint` role, and the status line's `reviewed N turns ago` replaces constant presence with visible staleness.
+It is **not** injected on every call. Rationale: constant injection of a 4K-token block across a 200-turn session costs ~800K duplicated input tokens and invalidates the prompt cache on every notebook change. Codex reads notes on demand and instead injects a server-generated `thread_hint` (≤4 KB) once at each new window; oh-my-pi's per-call injection (PR #10893, a three-day local re-implementation of the Codex feature announced with Astra, 2026-09-05→08) is the cheapest way to fill the gap left by having no `thread_hint`, and its PR states no cost or cache impact was measured. Here the snapshot embedded in the rollover summary (§5) plays the `thread_hint` role, and the status line's `+NK since review` replaces constant presence with visible staleness — delivered the way §4.1 describes, because the same cache argument applies to any per-call trailing message, however small.
 
 ### 4.3 Entry ids
 
@@ -168,7 +179,7 @@ Tool dispatch enforcement during `maintenance:requested`: a `tool_call` handler 
 
 Appended to the system prompt via `before_agent_start`. Final text:
 
-> **Working notes across context windows.** Keep a compact checkpoint in `notes`: the task and its binding constraints, observed state (label `untested`, `inferred`, `blocked`), decisions with one-line reasons and ruled-out directions, the next action, and exact references (`[history entry=…]`, file:line, commands). Update it after meaningful batches of work and when the status line or a reminder shows it is stale — not after every edit.
+> **Working notes across context windows.** Keep a compact checkpoint in `notes`: the task and its binding constraints, observed state (label `untested`, `inferred`, `blocked`), decisions with one-line reasons and ruled-out directions, the next action, and exact references (`[history entry=…]`, file:line, commands). Update it after meaningful batches of work and when the status line (a `[note-context]` line at the end of a tool result: context tokens used, and tokens added since your last notes review) or a reminder shows it is stale — not after every edit.
 >
 > Request `new_context` when the window holds a substantial amount of finished work that no longer needs to be in view — an exploration whose conclusions are recorded, a completed unit whose outcome is verified and noted, a large output whose result is captured — or when the status line shows pressure. A milestone alone is not a reason; the test is whether what leaves the window is either in notes or has an exact reference. Do not batch `new_context` with other tools or with the notes write; wait for the notes result first. Rolling over before answering the user is fine when continuing the task needs it.
 >

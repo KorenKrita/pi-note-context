@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { DEFAULT_CONFIG, parseConfig } from "../src/config.ts";
 import { step, zoneFor, type MaintenanceState } from "../src/maintenance.ts";
-import { formatTokens, renderStatusLine, turnsSince } from "../src/status.ts";
+import { appendSuffixPatch, formatTokens, renderStatusLine, StatusOdometer, tokensSinceReview } from "../src/status.ts";
 import { addTrailers, buildIdIndex } from "../src/trailers.ts";
 import { assistant, notebookEntry, toolResult, user } from "./fixtures.ts";
 import { EMPTY_NOTEBOOK } from "../src/notebook.ts";
@@ -94,17 +94,45 @@ describe("trailers", () => {
 });
 
 describe("status line", () => {
-  test("renders facts only", () => {
-    const branch = [user("u1", "a"), notebookEntry("n1", 2, { Task: "t" }, "a0"), assistant("a1", "x"), assistant("a2", "y")];
-    const nb = { revision: 2, sections: { Task: "t" }, reviewedThrough: "a1", entryId: "n1" };
-    const line = renderStatusLine({ window: 2, usage: { tokens: 142_300, contextWindow: 272_000 }, notebook: nb, turnsSinceReview: turnsSince(branch, "a1") });
-    expect(line).toBe("[note-context] window #2 (prev #1) · 142K/272K · notes rev 2, reviewed 1 turn ago");
-    const empty = renderStatusLine({ window: 1, usage: { tokens: null, contextWindow: 200_000 }, notebook: EMPTY_NOTEBOOK, turnsSinceReview: null, branchChanged: true });
-    expect(empty).toBe("[note-context] window #1 · ?/200K · no notes yet · branch changed — verify workspace state");
+  const nb = { revision: 2, sections: { Task: "t" }, reviewedThrough: "a1", reviewedTokens: 90_000, entryId: "n1" };
+  test("renders facts only: pressure and tokens since review", () => {
+    const line = renderStatusLine({ usage: { tokens: 142_300, contextWindow: 272_000 }, notebook: nb, tokensSinceReview: tokensSinceReview(142_300, nb) });
+    expect(line).toBe("[note-context] 142K/272K · notes rev 2, +52K since review");
+    const empty = renderStatusLine({ usage: { tokens: null, contextWindow: 200_000 }, notebook: EMPTY_NOTEBOOK, tokensSinceReview: null, branchChanged: true });
+    expect(empty).toBe("[note-context] ?/200K · no notes yet · branch changed — verify workspace state");
   });
-  test("status line names the budget scale on large windows", () => {
-    const line = renderStatusLine({ window: 1, usage: { tokens: 142_300, contextWindow: 400_000, physicalWindow: 1_000_000 }, notebook: EMPTY_NOTEBOOK, turnsSinceReview: null });
-    expect(line).toBe("[note-context] window #1 · 142K/400K budget (1M window) · no notes yet");
+  test("names the budget scale on large windows; staleness unknown for pre-field records", () => {
+    const legacy = { ...nb, reviewedTokens: null };
+    const line = renderStatusLine({ usage: { tokens: 142_300, contextWindow: 400_000, physicalWindow: 1_000_000 }, notebook: legacy, tokensSinceReview: tokensSinceReview(142_300, legacy) });
+    expect(line).toBe("[note-context] 142K/400K budget (1M window) · notes rev 2");
+  });
+  test("odometer: first reading, then only on a pressure step or a staleness step; notes write re-arms staleness", () => {
+    const step = 40_000;
+    const o = new StatusOdometer();
+    const at = (tokens: number, book = nb) => {
+      const since = tokensSinceReview(tokens, book);
+      const show = o.shouldShow(step, tokens, since, book);
+      if (show) o.confirm(step, tokens, since, book);
+      return show;
+    };
+    expect(at(95_000)).toBe(true); // first reading
+    expect(at(110_000)).toBe(false); // same pressure step (2), since=20K < step
+    expect(at(125_000)).toBe(true); // pressure step 2 → 3
+    expect(at(131_000)).toBe(true); // since=41K crosses one step
+    expect(at(150_000)).toBe(false); // step 3, since-step 1 already shown for this revision
+    const written = { ...nb, revision: 3, reviewedTokens: 150_000, entryId: "n2" };
+    expect(at(155_000, written)).toBe(false); // fresh notes, no pressure step change
+    expect(at(191_000, written)).toBe(true); // pressure step 3 → 4 (since=41K would also fire)
+    expect(at(120_000, written)).toBe(true); // pressure fell a step: shown (both directions)
+    o.force();
+    expect(at(120_000, written)).toBe(true); // forced (branch change) shows regardless
+    expect(at(120_000, written)).toBe(false);
+  });
+  test("appendSuffixPatch lands on the last text part; none → undefined", () => {
+    const patched = appendSuffixPatch([{ type: "text", text: "out" }, { type: "image", data: "x", mimeType: "image/png" }], "[s]");
+    expect(patched?.content[0]).toEqual({ type: "text", text: "out\n\n[s]" });
+    expect(patched?.content[1]).toEqual({ type: "image", data: "x", mimeType: "image/png" });
+    expect(appendSuffixPatch([{ type: "image", data: "x", mimeType: "image/png" }], "[s]")).toBeUndefined();
   });
   test("formatTokens", () => {
     expect(formatTokens(999)).toBe("999");

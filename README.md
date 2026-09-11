@@ -32,11 +32,14 @@ Optional `~/.pi/agent/pi-note-context.json` (global only; every field optional):
   "externalCompactionModels": [],
   "entryIdTrailers": true,
   "autoRollover": true,
-  "budgetTokens": 400000
+  "budgetTokens": 400000,
+  "statusStepTokens": 40000
 }
 ```
 
 `budgetTokens` (default 400K): pressure, reminders and the fallback are measured against `min(contextWindow, budgetTokens)` — a 1M window degrades long before it fills. The status line shows `used/400K budget (1M window)`.
+
+`statusStepTokens` (default 40K): the status line is appended to a tool result (and persisted with it, so provider prompt caches keep hitting) when context usage crosses a multiple of this, or when tokens added since the last notes write/review cross it — not on every call. Shape: `[note-context] 142K/400K budget (1M window) · notes rev 7, +52K since review`.
 
 `autoRollover` (default `true`): after a notes write that passes the gate, the host schedules the rollover itself — the model does not need to call `new_context`.
 

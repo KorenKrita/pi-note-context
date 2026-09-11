@@ -25,6 +25,8 @@ export interface Config {
   autoRolloverFloorPercent: number;
   /** Pressure is measured against min(contextWindow, budgetTokens): large windows degrade before they fill. */
   budgetTokens: number;
+  /** Status-line step: a reading is delivered when pressure or tokens-since-review cross a multiple of this. */
+  statusStepTokens: number;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -40,6 +42,7 @@ export const DEFAULT_CONFIG: Config = {
   autoRollover: true,
   autoRolloverFloorPercent: 50,
   budgetTokens: 400_000,
+  statusStepTokens: 40_000,
 };
 
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
@@ -73,6 +76,7 @@ export function parseConfig(raw: unknown): Config {
     autoRollover: typeof r["autoRollover"] === "boolean" ? r["autoRollover"] : DEFAULT_CONFIG.autoRollover,
     autoRolloverFloorPercent: Math.min(100, num(r["autoRolloverFloorPercent"], DEFAULT_CONFIG.autoRolloverFloorPercent, 0)),
     budgetTokens: num(r["budgetTokens"], DEFAULT_CONFIG.budgetTokens, 32_000),
+    statusStepTokens: num(r["statusStepTokens"], DEFAULT_CONFIG.statusStepTokens, 1_000),
   };
 }
 

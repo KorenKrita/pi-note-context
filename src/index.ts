@@ -27,7 +27,7 @@ import { maintenanceRequestText, reminderText, step, zoneFor, type MaintenanceSt
 import { applySections, makeRecord, NOTEBOOK_ENTRY_TYPE, reconstructNotebook, renderNotebook, type Notebook } from "./notebook.ts";
 import { estimateTokens as estimateText } from "./notebook.ts";
 import { droppedRange, makeDetails, pinUserMessages, renderRolloverSummary, type RolloverReason } from "./rollover.ts";
-import { renderStatusLine, STATUS_CUSTOM_TYPE, turnsSince } from "./status.ts";
+import { appendSuffixPatch, renderStatusLine, StatusOdometer, tokensSinceReview, turnsSince } from "./status.ts";
 import { addTrailers, buildIdIndex } from "./trailers.ts";
 
 type ToolOut = { content: { type: "text"; text: string }[]; details: Record<string, unknown> };
@@ -57,6 +57,9 @@ const HistoryParams = Type.Object({
 
 const NewContextParams = Type.Object({});
 const MAINTENANCE_CUSTOM_TYPE = "note-context/maintenance";
+/** Custom type of the per-request status message written by versions ≤ 0.3; filtered out of context, never written. */
+const LEGACY_STATUS_CUSTOM_TYPE = "note-context/status";
+const OWN_TOOLS = new Set(["notes", "history", "new_context"]);
 
 export default function noteContext(pi: ExtensionAPI): void {
   const config: Config = loadConfig();
@@ -74,6 +77,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   let lastRolloverLeafId: string | null = null; // for "turns since rollover" in history ledger rows
   let lastCompactionWasOurs = false;
   let cacheAcc = { calls: 0, cacheRead: 0, input: 0 }; // provider cache stats for the current window
+  const statusOdometer = new StatusOdometer();
 
   const resetVolatile = () => {
     branchChangedPending = false;
@@ -85,6 +89,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     lastRolloverLeafId = null;
     lastCompactionWasOurs = false;
     cacheAcc = { calls: 0, cacheRead: 0, input: 0 };
+    statusOdometer.reset();
   };
 
   // ------------------------------------------------------------------ helpers
@@ -185,7 +190,7 @@ export default function noteContext(pi: ExtensionAPI): void {
       }
 
       const commitReview = () => {
-        const record = makeRecord(current, current.sections, issuingAssistantId(ctx), true);
+        const record = makeRecord(current, current.sections, issuingAssistantId(ctx), true, ctx.getContextUsage()?.tokens ?? null);
         pi.appendEntry(NOTEBOOK_ENTRY_TYPE, record);
         appendLedger({ kind: "notes_write", session: sessionId(ctx), window, revision: record.revision, bytes: 0, reviewOnly: true });
         onNotesLanded(ctx, record.revision);
@@ -211,7 +216,7 @@ export default function noteContext(pi: ExtensionAPI): void {
         const { record, auto } = commitReview();
         return text(`Notebook revision ${record.revision}: content unchanged, review marker updated.${auto}`, { revision: record.revision, reviewOnly: true, autoRollover: auto !== "" });
       }
-      const record = makeRecord(current, result.sections, issuingAssistantId(ctx));
+      const record = makeRecord(current, result.sections, issuingAssistantId(ctx), false, ctx.getContextUsage()?.tokens ?? null);
       pi.appendEntry(NOTEBOOK_ENTRY_TYPE, record);
       appendLedger({ kind: "notes_write", session: sessionId(ctx), window, revision: record.revision, bytes: result.size.bytes, reviewOnly: false });
       onNotesLanded(ctx, record.revision);
@@ -437,6 +442,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     reminderShownForWindow = null;
     maintenanceExhaustedForWindow = null;
     lastCompactionWasOurs = false;
+    statusOdometer.reset(); // new window: first reading always shows
   });
   pi.on("session_compact_failed", async () => {
     pendingRollover = null;
@@ -502,10 +508,11 @@ export default function noteContext(pi: ExtensionAPI): void {
 
   pi.on("context", async (event, ctx) => {
     const branch = branchOf(ctx);
-    const notebook = reconstructNotebook(branch);
     const activeAttempt = maintenance.kind === "requested" ? maintenance.attempt : null;
     let messages = event.messages
-      .filter((m) => !(m.role === "custom" && m.customType === STATUS_CUSTOM_TYPE))
+      // Status messages written by earlier versions (a trailing custom message per
+      // request) are dropped; the status line now lives inside tool results.
+      .filter((m) => !(m.role === "custom" && m.customType === LEGACY_STATUS_CUSTOM_TYPE))
       .map((m) => {
         // A maintenance instruction is imperative; once its attempt is no longer active it must
         // not survive in the retained tail as a live command.
@@ -517,18 +524,36 @@ export default function noteContext(pi: ExtensionAPI): void {
         return m;
       });
     if (config.entryIdTrailers) messages = addTrailers(messages, buildIdIndex(branch));
+    return { messages };
+  });
+
+  // The status line is a suffix on a tool result, persisted with it, so every later
+  // request replays it byte-for-byte (a trailing message that changes between requests
+  // breaks implicit prefix caching). Delivered when pressure crosses a step of
+  // `statusStepTokens`, when tokens added since the last notes review cross a step, on
+  // the first reading of a window, and once after /tree navigation. Own tool results
+  // and error results are never decorated.
+  pi.on("tool_result", async (event, ctx) => {
+    if (event.isError || OWN_TOOLS.has(event.toolName)) return undefined;
+    const branch = branchOf(ctx);
+    const notebook = reconstructNotebook(branch);
     const physicalUsage = ctx.getContextUsage();
+    const tokens = physicalUsage?.tokens ?? null;
+    const since = tokensSinceReview(tokens, notebook);
+    if (branchChangedPending) statusOdometer.force();
+    if (!statusOdometer.shouldShow(config.statusStepTokens, tokens, since, notebook)) return undefined;
     const line = renderStatusLine({
-      window: currentWindow(branch),
-      usage: physicalUsage ? { tokens: physicalUsage.tokens, contextWindow: budgetWindow(ctx), physicalWindow: physicalUsage.contextWindow } : undefined,
+      usage: physicalUsage ? { tokens, contextWindow: budgetWindow(ctx), physicalWindow: physicalUsage.contextWindow } : undefined,
       notebook,
-      turnsSinceReview: turnsSince(branch, notebook.reviewedThrough),
+      tokensSinceReview: since,
       branchChanged: branchChangedPending,
       externalCompaction: externalOwner(ctx),
     });
+    const patch = appendSuffixPatch(event.content, line);
+    if (!patch) return undefined; // no text part to carry it: stay armed for the next result
+    statusOdometer.confirm(config.statusStepTokens, tokens, since, notebook);
     branchChangedPending = false;
-    messages.push({ role: "custom", customType: STATUS_CUSTOM_TYPE, content: line, display: false, timestamp: Date.now() });
-    return { messages };
+    return patch;
   });
 
   // Provider cache statistics are accumulated in memory and written as ONE row per
