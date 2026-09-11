@@ -79,7 +79,8 @@ export interface ApplyInput {
   replaceAll?: boolean;
 }
 
-const SECTION_NAME = /^[A-Za-z][A-Za-z0-9 _-]{0,31}$/;
+/** Starts with a letter (any script), then letters/digits/marks/space/_/-; ≤32 code points; single line so it renders as a heading. */
+const SECTION_NAME = /^\p{L}[\p{L}\p{N}\p{M} _-]{0,31}$/u;
 
 /**
  * Atomically apply a section map to the current sections.

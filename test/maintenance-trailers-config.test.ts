@@ -123,5 +123,8 @@ describe("config", () => {
     expect(c.externalCompactionModels).toEqual(["a/b"]);
     expect(c.entryIdTrailers).toBe(false);
     expect(parseConfig(null)).toBe(DEFAULT_CONFIG);
+    expect(parseConfig({ autoRolloverFloorPercent: 30 }).autoRolloverFloorPercent).toBe(30);
+    expect(parseConfig({ autoRolloverFloorPercent: 150 }).autoRolloverFloorPercent).toBe(100);
+    expect(parseConfig({ autoRolloverFloorPercent: -1 }).autoRolloverFloorPercent).toBe(50);
   });
 });

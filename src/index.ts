@@ -313,6 +313,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     if (externalOwner(ctx)) return "";
     const branch = branchOf(ctx);
     const window = currentWindow(branch);
+    const usage = ctx.getContextUsage();
     const verdict = evaluateGate({
       branch: contextOf(ctx),
       notebook,
@@ -320,8 +321,12 @@ export default function noteContext(pi: ExtensionAPI): void {
       minReclaimTokens: config.minReclaimTokens,
       pending: false,
       summaryTokens: summaryTokenEstimate(ctx, notebook),
+      pressure: usage?.tokens != null ? { tokens: usage.tokens, budgetTokens: budgetWindow(ctx), floorPercent: config.autoRolloverFloorPercent } : undefined,
     });
-    if (!verdict.ok) return "";
+    if (!verdict.ok) {
+      if (verdict.blocker === "low_pressure") appendLedger({ kind: "gate", session: sessionId(ctx), window, ok: false, blocker: verdict.blocker, auto: true });
+      return "";
+    }
     pendingRollover = { reason: "host", requestedAtLeaf: ctx.sessionManager.getLeafId() };
     appendLedger({ kind: "gate", session: sessionId(ctx), window, ok: true, reclaim: verdict.reclaimTokens, auto: true });
     return `\nRollover scheduled by the host: window #${window} → #${window + 1} at the end of this turn (~${Math.round(verdict.reclaimTokens / 1000)}K tokens reclaimed). Finish what this turn needs; the new window opens with these notes.`;

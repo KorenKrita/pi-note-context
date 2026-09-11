@@ -16,11 +16,19 @@ export interface GateInput {
   pending: boolean;
   /** Estimated tokens of the template summary that will replace the dropped range. */
   summaryTokens: number;
+  /**
+   * Host-initiated path only: current window pressure and the floor below which the host
+   * does not roll over on its own, however large the reclaim. A rollover rebuilds the
+   * provider prefix cache (25× read price on some providers) and is only worth it when the
+   * window is substantially used; at task end with a mostly empty window it is pure cost.
+   * Omit for the model-initiated path: the model calling new_context is the judgment.
+   */
+  pressure?: { tokens: number; budgetTokens: number; floorPercent: number };
 }
 
 export type GateVerdict =
   | { ok: true; firstKeptEntryId: string; reclaimTokens: number; droppedEntries: number }
-  | { ok: false; blocker: "already_pending" | "no_notebook" | "stale_notebook" | "nothing_to_drop" | "low_reclaim"; message: string; reclaimTokens?: number };
+  | { ok: false; blocker: "already_pending" | "no_notebook" | "stale_notebook" | "nothing_to_drop" | "low_reclaim" | "low_pressure"; message: string; reclaimTokens?: number };
 
 /**
  * Index where the droppable range starts inside the active context entries.
@@ -51,6 +59,12 @@ export function estimateRange(branch: readonly SessionEntry[], from: number, to:
 export function evaluateGate(input: GateInput): GateVerdict {
   if (input.pending) return { ok: false, blocker: "already_pending", message: "rollover already scheduled for the end of this turn." };
   if (input.notebook.revision === 0) return { ok: false, blocker: "no_notebook", message: "no notebook on this branch — write notes first." };
+  if (input.pressure && input.pressure.budgetTokens > 0) {
+    const percent = Math.round((input.pressure.tokens / input.pressure.budgetTokens) * 100);
+    if (percent < input.pressure.floorPercent) {
+      return { ok: false, blocker: "low_pressure", message: `window at ${percent}% of budget; the host rolls over on its own from ${input.pressure.floorPercent}% — call new_context yourself if a fresh window is worth it now.` };
+    }
+  }
 
   const { firstKeptEntryId, firstKeptIndex, start } = projectCut(input.branch, input.settings.keepRecentTokens);
   if (!firstKeptEntryId || firstKeptIndex <= start) {

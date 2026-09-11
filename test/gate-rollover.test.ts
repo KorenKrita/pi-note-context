@@ -54,6 +54,18 @@ describe("gate", () => {
     expect(!v2.ok && v2.blocker).toBe("already_pending");
   });
 
+  test("host path: refuses below the pressure floor even when reclaim is large; model path (no pressure) is unaffected", () => {
+    const branch = longWindow({ reviewedAfterDrop: true });
+    const nb = reconstructNotebook(branch);
+    const base = { branch, notebook: nb, settings: { keepRecentTokens: KEEP }, minReclaimTokens: 20_000, pending: false, summaryTokens: 500 };
+    const low = evaluateGate({ ...base, pressure: { tokens: 84_000, budgetTokens: 400_000, floorPercent: 50 } });
+    expect(!low.ok && low.blocker).toBe("low_pressure");
+    expect(!low.ok && low.message).toContain("21%");
+    const high = evaluateGate({ ...base, pressure: { tokens: 200_000, budgetTokens: 400_000, floorPercent: 50 } });
+    expect(high.ok).toBe(true);
+    expect(evaluateGate(base).ok).toBe(true);
+  });
+
   test("context entries: droppable range starts after the leading compaction entry and includes its retained tail", () => {
     // buildContextEntries() shape: [compaction, ...retained tail, ...newer]
     const context: SessionEntry[] = [rolloverEntry("r1", "t8", 2), ...round(8, 60), ...round(9, 60), notebookEntry("n2", 2, { Task: "t" }, "a9"), ...round(10, 1)];

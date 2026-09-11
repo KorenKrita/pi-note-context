@@ -21,6 +21,8 @@ export interface Config {
   entryIdTrailers: boolean;
   /** Host schedules a rollover after a notes write when the gate passes (no new_context call needed). */
   autoRollover: boolean;
+  /** Host-initiated rollover only fires at or above this share of the budget; below it the model must call new_context itself. */
+  autoRolloverFloorPercent: number;
   /** Pressure is measured against min(contextWindow, budgetTokens): large windows degrade before they fill. */
   budgetTokens: number;
 }
@@ -36,6 +38,7 @@ export const DEFAULT_CONFIG: Config = {
   historyReadMaxChars: 12_000,
   entryIdTrailers: true,
   autoRollover: true,
+  autoRolloverFloorPercent: 50,
   budgetTokens: 400_000,
 };
 
@@ -68,6 +71,7 @@ export function parseConfig(raw: unknown): Config {
     historyReadMaxChars: num(r["historyReadMaxChars"], DEFAULT_CONFIG.historyReadMaxChars, 500),
     entryIdTrailers: typeof r["entryIdTrailers"] === "boolean" ? r["entryIdTrailers"] : DEFAULT_CONFIG.entryIdTrailers,
     autoRollover: typeof r["autoRollover"] === "boolean" ? r["autoRollover"] : DEFAULT_CONFIG.autoRollover,
+    autoRolloverFloorPercent: Math.min(100, num(r["autoRolloverFloorPercent"], DEFAULT_CONFIG.autoRolloverFloorPercent, 0)),
     budgetTokens: num(r["budgetTokens"], DEFAULT_CONFIG.budgetTokens, 32_000),
   };
 }

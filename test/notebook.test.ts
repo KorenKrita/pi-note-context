@@ -63,8 +63,16 @@ describe("applySections", () => {
   });
 
   test("rejects section names that cannot be rendered as headings", () => {
-    const r = applySections({}, { sections: { "## bad\nname": "x" } });
-    expect(!r.ok && r.reason).toBe("invalid_section_name");
+    for (const bad of ["## bad\nname", "", " lead", "1st", "a".repeat(33)]) {
+      const r = applySections({}, { sections: { [bad]: "x" } });
+      expect(!r.ok && r.reason).toBe("invalid_section_name");
+    }
+  });
+
+  test("accepts non-ASCII section names (the model writes in its working language)", () => {
+    const r = applySections({}, { sections: { "Herdr修改": "x", "État": "y", "状态 2": "z" } });
+    expect(r.ok).toBe(true);
+    expect(r.ok && Object.keys(r.sections)).toEqual(["Herdr修改", "État", "状态 2"]);
   });
 
   test("prototype-named sections are stored, not silently dropped", () => {
