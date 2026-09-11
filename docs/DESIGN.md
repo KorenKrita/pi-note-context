@@ -107,7 +107,7 @@ It is **not** injected on every call. Rationale: constant injection of a 4K-toke
 
 In the `context` event, every model-visible message that already has a persisted journal id gets a trailing text block `[history entry=<id>]`. Ids are Pi's real entry ids, never invented aliases. Structured (JSON) tool output is not modified inside; the trailer is a separate text block. Image and other non-text blocks are preserved.
 
-Cache impact: trailers are idempotent per entry, so the serialized prefix is stable across calls except at the point where a message first acquires its id (normally the last one or two messages). The ledger records provider cache-read tokens so this can be verified rather than assumed.
+Cache impact: trailers are idempotent per entry, so the serialized prefix is stable across calls except at the point where a message first acquires its id (normally the last one or two messages). The ledger records provider cache-read and uncached-input tokens summed per window (one `window_cache` row at rollover) so this can be verified rather than assumed. First measurement, 2026-09-11, one 177-call session: 96.2% cache-read share; the four calls below 50% were window starts and reloads.
 
 ## 5. Rollover
 

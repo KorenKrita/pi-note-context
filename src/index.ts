@@ -73,6 +73,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   let maintenanceExhaustedForWindow: number | null = null;
   let lastRolloverLeafId: string | null = null; // for "turns since rollover" in history ledger rows
   let lastCompactionWasOurs = false;
+  let cacheAcc = { calls: 0, cacheRead: 0, input: 0 }; // provider cache stats for the current window
 
   const resetVolatile = () => {
     branchChangedPending = false;
@@ -83,6 +84,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     maintenanceExhaustedForWindow = null;
     lastRolloverLeafId = null;
     lastCompactionWasOurs = false;
+    cacheAcc = { calls: 0, cacheRead: 0, input: 0 };
   };
 
   // ------------------------------------------------------------------ helpers
@@ -413,6 +415,10 @@ export default function noteContext(pi: ExtensionAPI): void {
     const details = makeDetails(window + 1, reason, notebook, pinned);
     lastCompactionWasOurs = true;
     appendLedger({ kind: "rollover", session: sessionId(ctx), fromWindow: window, reason, notebookRevision: notebook.revision, reclaim: null, pinned: pinned.length });
+    if (cacheAcc.calls > 0) {
+      appendLedger({ kind: "window_cache", session: sessionId(ctx), window, ...cacheAcc });
+      cacheAcc = { calls: 0, cacheRead: 0, input: 0 };
+    }
     return { compaction: { summary, firstKeptEntryId: event.preparation.firstKeptEntryId, tokensBefore: event.preparation.tokensBefore, details } };
   });
 
@@ -520,11 +526,16 @@ export default function noteContext(pi: ExtensionAPI): void {
     return { messages };
   });
 
-  pi.on("message_end", async (event, ctx) => {
+  // Provider cache statistics are accumulated in memory and written as ONE row per
+  // window at rollover (see session_before_compact). A per-call row carried no
+  // behavioural information and outnumbered every other ledger kind 20:1.
+  pi.on("message_end", async (event) => {
     if (event.message.role !== "assistant") return undefined;
     const u = event.message.usage;
     if (u && (u.cacheRead > 0 || u.input > 0)) {
-      appendLedger({ kind: "cache", session: sessionId(ctx), window: currentWindow(branchOf(ctx)), cacheRead: u.cacheRead, input: u.input });
+      cacheAcc.calls += 1;
+      cacheAcc.cacheRead += u.cacheRead;
+      cacheAcc.input += u.input;
     }
     return undefined;
   });

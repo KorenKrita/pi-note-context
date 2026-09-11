@@ -18,7 +18,8 @@ export type LedgerRow =
   | { kind: "reminder"; session: string; window: number; zone: string }
   | { kind: "maintenance"; session: string; window: number; action: string; attempt: number }
   | { kind: "history"; session: string; window: number; mode: "search" | "read" | "list"; hits?: number; turnsSinceRollover: number | null }
-  | { kind: "cache"; session: string; window: number; cacheRead: number; input: number };
+  /** One row per window, written at rollover; sums provider usage over the window's assistant messages. */
+  | { kind: "window_cache"; session: string; window: number; calls: number; cacheRead: number; input: number };
 
 export function ledgerPath(env: NodeJS.ProcessEnv = process.env): string {
   const base = env["PI_CODING_AGENT_DIR"] ?? join(homedir(), ".pi", "agent");
