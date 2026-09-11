@@ -353,9 +353,10 @@ export default function noteContext(pi: ExtensionAPI): void {
             { deliverAs: "followUp", triggerTurn: true },
           );
         },
-        onError: () => {
+        onError: (error) => {
           maintenance = { kind: "idle" };
           inFlightRollover = null;
+          appendLedger({ kind: "rollover_failed", session: sessionId(ctx), window: currentWindow(branchOf(ctx)), reason: "fallback", error: String(error?.message ?? error).slice(0, 200) });
         },
       });
     }
@@ -451,14 +452,33 @@ export default function noteContext(pi: ExtensionAPI): void {
   });
 
   // --------------------------------------- scheduled rollover + pressure watch
-  // A model-requested rollover runs once the agent run has settled: the model
+  // A model- or host-requested rollover runs once the agent run has settled: the model
   // was told to end its turn after new_context, and ctx.compact() aborts any
   // in-flight run, so this is the only safe moment. pendingRollover is cleared
   // synchronously before compact() to make the schedule idempotent.
+  //
+  // A host schedule is re-checked here against the cut Pi will actually make: the gate
+  // passed when notes were written, but the model may have kept working ("finish what this
+  // turn needs"), so by settle time the cut can have moved past the review marker. Handing
+  // that to compaction would make session_before_compact decline the template and fall
+  // through to Pi's LLM summary — the outcome the host path exists to avoid. A stale
+  // schedule is cancelled and recorded; the next notes write re-arms it. The model path is
+  // not re-checked: the model's new_context call is the judgment, and session_before_compact
+  // still guards the template on a stale notebook.
   pi.on("agent_settled", async (_event, ctx) => {
     if (!pendingRollover || (pendingRollover.reason !== "model" && pendingRollover.reason !== "host")) return;
-    inFlightRollover = { reason: pendingRollover.reason };
+    const reason = pendingRollover.reason;
     pendingRollover = null;
+    if (reason === "host") {
+      const branch = branchOf(ctx);
+      const window = currentWindow(branch);
+      const stale = hostScheduleStale(ctx, reconstructNotebook(branch));
+      if (stale) {
+        appendLedger({ kind: "rollover_cancelled", session: sessionId(ctx), window, reason, why: stale });
+        return;
+      }
+    }
+    inFlightRollover = { reason };
     ctx.compact({
       onComplete: () => {
         inFlightRollover = null;
@@ -467,11 +487,22 @@ export default function noteContext(pi: ExtensionAPI): void {
           { deliverAs: "followUp", triggerTurn: true },
         );
       },
-      onError: () => {
+      onError: (error) => {
         inFlightRollover = null;
+        appendLedger({ kind: "rollover_failed", session: sessionId(ctx), window: currentWindow(branchOf(ctx)), reason, error: String(error?.message ?? error).slice(0, 200) });
       },
     });
   });
+
+  /** Why a host schedule no longer holds at settle time, or null when it still does. */
+  function hostScheduleStale(ctx: ExtensionContext, notebook: Notebook): string | null {
+    if (notebook.revision === 0) return "no_notebook";
+    const context = contextOf(ctx);
+    const cut = projectCut(context, compactionSettings(ctx).keepRecentTokens);
+    if (!cut.firstKeptEntryId || cut.firstKeptIndex <= cut.start) return "nothing_to_drop";
+    if (!freshAgainstCut(context, notebook, cut.firstKeptEntryId)) return "stale_notebook";
+    return null;
+  }
 
   pi.on("turn_end", async (event, ctx) => {
     if (pendingRollover || inFlightRollover || maintenance.kind !== "idle") return;

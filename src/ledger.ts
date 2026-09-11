@@ -15,6 +15,10 @@ export type LedgerRow =
   | { kind: "gate"; session: string; window: number; ok: boolean; blocker?: string; reclaim?: number; auto?: boolean }
   | { kind: "rollover"; session: string; fromWindow: number; reason: string; notebookRevision: number; reclaim: number | null; pinned: number }
   | { kind: "rollover_declined"; session: string; window: number; why: string }
+  /** A scheduled (host/model/fallback) rollover was dropped at settle time because the gate no longer held; no compaction ran. */
+  | { kind: "rollover_cancelled"; session: string; window: number; reason: string; why: string }
+  /** ctx.compact() for a scheduled rollover reported an error; Pi wrote no compaction entry. */
+  | { kind: "rollover_failed"; session: string; window: number; reason: string; error: string }
   | { kind: "reminder"; session: string; window: number; zone: string }
   | { kind: "maintenance"; session: string; window: number; action: string; attempt: number }
   | { kind: "history"; session: string; window: number; mode: "search" | "read" | "list"; hits?: number; turnsSinceRollover: number | null }
