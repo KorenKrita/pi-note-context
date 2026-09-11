@@ -283,25 +283,24 @@ export default function noteContext(pi: ExtensionAPI): void {
         appendLedger({ kind: "gate", session: sessionId(ctx), window, ok: true });
         return text(`rollover scheduled (external compaction owner for ${modelKey(ctx)}): window #${window} → #${window + 1} at the end of this turn. End the turn now without further tool calls.`, { external: true });
       }
+      // A host schedule does not count as "already pending": the model's own call runs the model
+      // gate (freshness, reclaim) and, if it passes, confirms the schedule as a model request, so
+      // a later host-only blocker (pressure floor, external owner) no longer cancels it.
+      const confirmingHost = pendingRollover?.reason === "host";
       const verdict = evaluateGate({
         branch: contextOf(ctx),
         notebook,
         settings: { keepRecentTokens: compactionSettings(ctx).keepRecentTokens },
         minReclaimTokens: config.minReclaimTokens,
-        pending: pendingRollover !== null,
+        pending: pendingRollover !== null && !confirmingHost,
         summaryTokens: summaryTokenEstimate(ctx, notebook),
       });
       appendLedger({ kind: "gate", session: sessionId(ctx), window, ok: verdict.ok, ...(verdict.ok ? { reclaim: verdict.reclaimTokens } : { blocker: verdict.blocker, reclaim: verdict.reclaimTokens }) });
-      if (!verdict.ok) {
-        if (verdict.blocker === "already_pending" && pendingRollover?.reason === "host") {
-          return text("A rollover is already scheduled by the host for the end of this turn; end the turn now.", { blocker: "already_pending", host: true });
-        }
-        return fail(`new_context refused: ${verdict.message}`);
-      }
+      if (!verdict.ok) return fail(`new_context refused: ${verdict.message}`);
       pendingRollover = { reason: "model", requestedAtLeaf: ctx.sessionManager.getLeafId() };
       return text(
-        `rollover scheduled: window #${window} → #${window + 1} at the end of this turn (~${Math.round(verdict.reclaimTokens / 1000)}K tokens reclaimed, ${verdict.droppedEntries} entries leave the window). End the turn now without further tool calls.`,
-        { reclaimTokens: verdict.reclaimTokens, droppedEntries: verdict.droppedEntries },
+        `rollover scheduled${confirmingHost ? " (confirms the host schedule)" : ""}: window #${window} → #${window + 1} at the end of this turn (~${Math.round(verdict.reclaimTokens / 1000)}K tokens reclaimed, ${verdict.droppedEntries} entries leave the window). End the turn now without further tool calls.`,
+        { reclaimTokens: verdict.reclaimTokens, droppedEntries: verdict.droppedEntries, confirmedHost: confirmingHost },
       );
     },
   });
@@ -471,19 +470,26 @@ export default function noteContext(pi: ExtensionAPI): void {
   // avoid. A failed re-check cancels the schedule and records the blocker; the next notes
   // write re-arms it. The model path is not re-checked: the model's new_context call is the
   // judgment, and session_before_compact still guards the template on a stale notebook.
+  //
+  // The same re-check also runs at turn_end (below) so that a host schedule which went stale
+  // inside the run is cancelled before it can mask the pressure maintenance for that turn.
+  //
+  /** Re-run the host gate on a pending host schedule; cancel and record it when it fails. Returns true when cancelled. */
+  function cancelHostScheduleIfStale(ctx: ExtensionContext): boolean {
+    if (pendingRollover?.reason !== "host") return false;
+    const branch = branchOf(ctx);
+    const verdict = hostGate(ctx, reconstructNotebook(branch));
+    if (verdict.ok) return false;
+    pendingRollover = null;
+    appendLedger({ kind: "rollover_cancelled", session: sessionId(ctx), window: currentWindow(branch), reason: "host", why: verdict.blocker });
+    return true;
+  }
+
   pi.on("agent_settled", async (_event, ctx) => {
     if (!pendingRollover || (pendingRollover.reason !== "model" && pendingRollover.reason !== "host")) return;
+    if (cancelHostScheduleIfStale(ctx)) return;
     const reason = pendingRollover.reason;
     pendingRollover = null;
-    if (reason === "host") {
-      const branch = branchOf(ctx);
-      const window = currentWindow(branch);
-      const verdict = hostGate(ctx, reconstructNotebook(branch));
-      if (!verdict.ok) {
-        appendLedger({ kind: "rollover_cancelled", session: sessionId(ctx), window, reason, why: verdict.blocker });
-        return;
-      }
-    }
     inFlightRollover = { reason };
     ctx.compact({
       onComplete: () => {
@@ -514,6 +520,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   }
 
   pi.on("turn_end", async (event, ctx) => {
+    if (event.message.role === "assistant") cancelHostScheduleIfStale(ctx);
     if (pendingRollover || inFlightRollover || maintenance.kind !== "idle") return;
     if (event.message.role !== "assistant") return;
     const usage = ctx.getContextUsage();

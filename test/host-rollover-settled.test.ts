@@ -46,6 +46,7 @@ function harness(config: Record<string, unknown> = {}) {
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, Tool>();
   const compactCalls: { onComplete?: () => void; onError?: (e: Error) => void }[] = [];
+  const sent: { customType?: string }[] = [];
   let extra = 0;
   const pi = {
     on: (ev: string, h: Handler) => {
@@ -56,7 +57,9 @@ function harness(config: Record<string, unknown> = {}) {
     appendEntry: (customType: string, data: unknown) => {
       branch.push({ id: `x${++extra}`, parentId: null, timestamp: new Date().toISOString(), type: "custom", customType, data } as SessionEntry);
     },
-    sendMessage: () => {},
+    sendMessage: (msg: { customType?: string }) => {
+      sent.push(msg);
+    },
   } as unknown as ExtensionAPI;
   noteContext(pi);
 
@@ -79,12 +82,20 @@ function harness(config: Record<string, unknown> = {}) {
   } as unknown as ExtensionContext;
 
   const emit = async (ev: string, event: unknown = {}) => {
-    for (const h of handlers.get(ev) ?? []) await h(event, ctx);
+    const results: unknown[] = [];
+    for (const h of handlers.get(ev) ?? []) results.push(await h(event, ctx));
+    return results;
   };
   const notes = async (params: unknown) => {
     const r = await tools.get("notes")!.execute("call", params, undefined, undefined, ctx);
     return r.content.map((c) => c.text).join("\n");
   };
+  const newContext = async () => {
+    const r = await tools.get("new_context")!.execute("call", {}, undefined, undefined, ctx);
+    return r.content.map((c) => c.text).join("\n");
+  };
+  /** turn_end for an assistant message, as Pi emits it after every assistant response. */
+  const turnEnd = () => emit("turn_end", { message: { role: "assistant" } });
   const ledgerRows = async () => {
     await flushLedger();
     try {
@@ -93,7 +104,7 @@ function harness(config: Record<string, unknown> = {}) {
       return [];
     }
   };
-  return { branch, ctx, usage, state, emit, notes, compactCalls, ledgerRows };
+  return { branch, ctx, usage, state, emit, notes, newContext, turnEnd, sent, compactCalls, ledgerRows };
 }
 
 describe("host rollover: re-check at agent_settled", () => {
@@ -164,5 +175,73 @@ describe("host rollover: re-check at agent_settled", () => {
     expect(failed?.["why"]).toBe("cancelled");
     expect(JSON.stringify(rows)).not.toContain(secret);
     expect(JSON.stringify(rows)).not.toContain("response body");
+  });
+});
+
+describe("host schedule vs. pressure maintenance and model confirmation", () => {
+  test("host pending that went stale under fallback pressure is cancelled at turn_end and maintenance takes over; compaction only after fresh notes", async () => {
+    const h = harness();
+    expect(await h.notes({ sections: { Task: "parser", Next: "x" } })).toContain("Rollover scheduled by the host");
+    // Unreviewed work lands and pressure climbs into the fallback zone
+    // (budget 400K − reserve 16384 − fallbackBuffer 12000 ≈ 371.6K).
+    for (let i = 20; i <= 31; i++) h.branch.push(...round(i, 20));
+    h.usage.tokens = 375_000;
+    await h.turnEnd();
+    const cancelled = (await h.ledgerRows()).find((r) => r["kind"] === "rollover_cancelled");
+    expect(cancelled?.["why"]).toBe("stale_notebook");
+    const request = h.sent.find((m) => m.customType === "note-context/maintenance") as { details?: { attempt?: number } } | undefined;
+    expect(request?.details?.attempt).toBe(1);
+    // The guard is live: a non-notes call is blocked while the checkpoint is requested.
+    const [guard] = await h.emit("tool_call", { toolName: "read", input: {} });
+    expect((guard as { block?: boolean } | undefined)?.block).toBe(true);
+    // Settling does not compact a stale notebook.
+    await h.emit("agent_settled");
+    expect(h.compactCalls.length).toBe(0);
+    // The checkpoint lands → fallback compaction, exactly once.
+    await h.notes({ sections: { Next: "checkpoint under pressure" } });
+    expect(h.compactCalls.length).toBe(1);
+    await h.emit("agent_settled");
+    expect(h.compactCalls.length).toBe(1);
+  });
+
+  test("host pending cancelled for low pressure does not start maintenance", async () => {
+    const h = harness();
+    await h.notes({ sections: { Task: "parser", Next: "x" } });
+    h.usage.tokens = 120_000;
+    await h.turnEnd();
+    await h.emit("agent_settled");
+    expect(h.compactCalls.length).toBe(0);
+    expect(h.sent.some((m) => m.customType === "note-context/maintenance")).toBe(false);
+    expect((await h.ledgerRows()).some((r) => r["kind"] === "rollover_cancelled" && r["why"] === "low_pressure")).toBe(true);
+  });
+
+  test("model new_context on top of a host schedule confirms it: a later pressure drop no longer cancels; compacts once", async () => {
+    const h = harness();
+    await h.notes({ sections: { Task: "parser", Next: "x" } });
+    const out = await h.newContext();
+    expect(out).toContain("rollover scheduled");
+    h.usage.tokens = 120_000; // below the host floor — irrelevant to a model request
+    await h.emit("agent_settled");
+    expect(h.compactCalls.length).toBe(1);
+    await h.emit("agent_settled");
+    expect(h.compactCalls.length).toBe(1);
+    expect((await h.ledgerRows()).some((r) => r["kind"] === "rollover_cancelled")).toBe(false);
+  });
+
+  test("model new_context on top of a host schedule still enforces freshness; the host schedule is kept for settle", async () => {
+    const h = harness();
+    await h.notes({ sections: { Task: "parser", Next: "x" } });
+    for (let i = 20; i <= 31; i++) h.branch.push(...round(i, 20));
+    await expect(h.newContext()).rejects.toThrow(/stale_notebook|notebook predates/);
+    await h.emit("agent_settled");
+    expect(h.compactCalls.length).toBe(0);
+    expect((await h.ledgerRows()).some((r) => r["kind"] === "rollover_cancelled" && r["why"] === "stale_notebook")).toBe(true);
+  });
+
+  test("a second new_context on top of a model schedule is still refused as already pending", async () => {
+    const h = harness();
+    await h.notes({ sections: { Task: "parser", Next: "x" } });
+    await h.newContext();
+    await expect(h.newContext()).rejects.toThrow(/already scheduled/);
   });
 });
