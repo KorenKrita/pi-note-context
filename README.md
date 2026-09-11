@@ -41,7 +41,7 @@ Optional `~/.pi/agent/pi-note-context.json` (global only; every field optional):
 
 `statusStepTokens` (default 40K): the status line is appended to a tool result (and persisted with it, so provider prompt caches keep hitting) when context usage crosses a multiple of this, or when tokens added since the last notes write/review cross it — not on every call. Shape: `[note-context] 142K/400K budget (1M window) · notes rev 7, +52K since review`.
 
-`autoRollover` (default `true`): after a notes write that passes the gate, the host schedules the rollover itself — the model does not need to call `new_context`. The schedule is re-checked when the turn settles; if work that landed after the write would be dropped unreviewed, it is cancelled (ledger `rollover_cancelled`) rather than handed to Pi's LLM summary, and the next notes write re-arms it.
+`autoRollover` (default `true`): after a notes write that passes the gate, the host schedules the rollover itself — the model does not need to call `new_context`. The same gate runs again when the turn settles; if it no longer passes (unreviewed work would be dropped, pressure fell below the floor, the model changed to an external compaction owner) the schedule is cancelled (ledger `rollover_cancelled` with the blocker) rather than handed to Pi's LLM summary, and the next notes write re-arms it.
 
 `externalCompactionModels` lists `provider/model` ids whose compaction is owned by another extension (e.g. remote Codex compaction); this plugin then yields the summary step for those models but keeps notes, history, reminders and the status line.
 

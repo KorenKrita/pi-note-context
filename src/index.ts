@@ -8,7 +8,7 @@
 import { SettingsManager, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { loadConfig, type Config } from "./config.ts";
-import { evaluateGate, projectCut } from "./gate.ts";
+import { evaluateGate, projectCut, type GateVerdict } from "./gate.ts";
 import {
   HISTORY_DESCRIPTION,
   HISTORY_GUIDELINES,
@@ -312,14 +312,11 @@ export default function noteContext(pi: ExtensionAPI): void {
    * passes, schedule the rollover without waiting for the model to call new_context, and
    * tell the model in the notes result. Returns the suffix to append to that result.
    */
-  function considerAutoRollover(ctx: ExtensionContext, notebook: Notebook): string {
-    if (!config.autoRollover) return "";
-    if (pendingRollover || inFlightRollover || maintenance.kind !== "idle") return "";
-    if (externalOwner(ctx)) return "";
-    const branch = branchOf(ctx);
-    const window = currentWindow(branch);
+  /** The host gate: the model gate plus the pressure floor and the external-owner yield. Used at schedule time and again at settle. */
+  function hostGate(ctx: ExtensionContext, notebook: Notebook): GateVerdict | { ok: false; blocker: "external_owner"; message: string } {
+    if (externalOwner(ctx)) return { ok: false, blocker: "external_owner", message: "another extension owns compaction for this model" };
     const usage = ctx.getContextUsage();
-    const verdict = evaluateGate({
+    return evaluateGate({
       branch: contextOf(ctx),
       notebook,
       settings: { keepRecentTokens: compactionSettings(ctx).keepRecentTokens },
@@ -328,6 +325,13 @@ export default function noteContext(pi: ExtensionAPI): void {
       summaryTokens: summaryTokenEstimate(ctx, notebook),
       pressure: usage?.tokens != null ? { tokens: usage.tokens, budgetTokens: budgetWindow(ctx), floorPercent: config.autoRolloverFloorPercent } : undefined,
     });
+  }
+
+  function considerAutoRollover(ctx: ExtensionContext, notebook: Notebook): string {
+    if (!config.autoRollover) return "";
+    if (pendingRollover || inFlightRollover || maintenance.kind !== "idle") return "";
+    const window = currentWindow(branchOf(ctx));
+    const verdict = hostGate(ctx, notebook);
     if (!verdict.ok) {
       if (verdict.blocker === "low_pressure") appendLedger({ kind: "gate", session: sessionId(ctx), window, ok: false, blocker: verdict.blocker, auto: true });
       return "";
@@ -356,7 +360,7 @@ export default function noteContext(pi: ExtensionAPI): void {
         onError: (error) => {
           maintenance = { kind: "idle" };
           inFlightRollover = null;
-          appendLedger({ kind: "rollover_failed", session: sessionId(ctx), window: currentWindow(branchOf(ctx)), reason: "fallback", error: String(error?.message ?? error).slice(0, 200) });
+          appendLedger({ kind: "rollover_failed", session: sessionId(ctx), window: currentWindow(branchOf(ctx)), reason: "fallback", why: compactFailureCategory(error) });
         },
       });
     }
@@ -457,14 +461,16 @@ export default function noteContext(pi: ExtensionAPI): void {
   // in-flight run, so this is the only safe moment. pendingRollover is cleared
   // synchronously before compact() to make the schedule idempotent.
   //
-  // A host schedule is re-checked here against the cut Pi will actually make: the gate
-  // passed when notes were written, but the model may have kept working ("finish what this
-  // turn needs"), so by settle time the cut can have moved past the review marker. Handing
-  // that to compaction would make session_before_compact decline the template and fall
-  // through to Pi's LLM summary — the outcome the host path exists to avoid. A stale
-  // schedule is cancelled and recorded; the next notes write re-arms it. The model path is
-  // not re-checked: the model's new_context call is the judgment, and session_before_compact
-  // still guards the template on a stale notebook.
+  // A host schedule is re-run through the same host gate here: it passed when notes were
+  // written, but the model may have kept working ("finish what this turn needs") and the
+  // world can move either way before settle — the cut can pass the review marker (stale
+  // notebook), pressure can fall below the floor (ObservationPack placeholders shrink the
+  // live context), the model can change, or an external compaction owner can take over.
+  // Handing a stale schedule to compaction would make session_before_compact decline the
+  // template and fall through to Pi's LLM summary — the outcome the host path exists to
+  // avoid. A failed re-check cancels the schedule and records the blocker; the next notes
+  // write re-arms it. The model path is not re-checked: the model's new_context call is the
+  // judgment, and session_before_compact still guards the template on a stale notebook.
   pi.on("agent_settled", async (_event, ctx) => {
     if (!pendingRollover || (pendingRollover.reason !== "model" && pendingRollover.reason !== "host")) return;
     const reason = pendingRollover.reason;
@@ -472,9 +478,9 @@ export default function noteContext(pi: ExtensionAPI): void {
     if (reason === "host") {
       const branch = branchOf(ctx);
       const window = currentWindow(branch);
-      const stale = hostScheduleStale(ctx, reconstructNotebook(branch));
-      if (stale) {
-        appendLedger({ kind: "rollover_cancelled", session: sessionId(ctx), window, reason, why: stale });
+      const verdict = hostGate(ctx, reconstructNotebook(branch));
+      if (!verdict.ok) {
+        appendLedger({ kind: "rollover_cancelled", session: sessionId(ctx), window, reason, why: verdict.blocker });
         return;
       }
     }
@@ -489,19 +495,22 @@ export default function noteContext(pi: ExtensionAPI): void {
       },
       onError: (error) => {
         inFlightRollover = null;
-        appendLedger({ kind: "rollover_failed", session: sessionId(ctx), window: currentWindow(branchOf(ctx)), reason, error: String(error?.message ?? error).slice(0, 200) });
+        appendLedger({ kind: "rollover_failed", session: sessionId(ctx), window: currentWindow(branchOf(ctx)), reason, why: compactFailureCategory(error) });
       },
     });
   });
 
-  /** Why a host schedule no longer holds at settle time, or null when it still does. */
-  function hostScheduleStale(ctx: ExtensionContext, notebook: Notebook): string | null {
-    if (notebook.revision === 0) return "no_notebook";
-    const context = contextOf(ctx);
-    const cut = projectCut(context, compactionSettings(ctx).keepRecentTokens);
-    if (!cut.firstKeptEntryId || cut.firstKeptIndex <= cut.start) return "nothing_to_drop";
-    if (!freshAgainstCut(context, notebook, cut.firstKeptEntryId)) return "stale_notebook";
-    return null;
+  /**
+   * Stable category for a ctx.compact() error — the ledger stores counts and ids only, never
+   * provider text. Matches Pi's own compact() messages (agent-session.ts); anything else is "other".
+   */
+  function compactFailureCategory(error: unknown): string {
+    const m = error instanceof Error ? error.message : String(error);
+    if (/^Compaction cancelled/.test(m)) return "cancelled";
+    if (/^Already compacted/.test(m)) return "already_compacted";
+    if (/^Nothing to compact/.test(m)) return "nothing_to_compact";
+    if (/^No model/i.test(m)) return "no_model";
+    return "other";
   }
 
   pi.on("turn_end", async (event, ctx) => {
