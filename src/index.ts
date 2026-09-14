@@ -55,7 +55,9 @@ const HistoryParams = Type.Object({
   offset: Type.Optional(Type.Integer({ minimum: 0, description: "list: entries to skip. query: matching entries to skip. id: character offset into the entry text." })),
 });
 
-const NewContextParams = Type.Object({});
+const NewContextParams = Type.Object({
+  userRequested: Type.Optional(Type.Boolean({ description: "Set true only when the user explicitly asks for a fresh context window. Skips reclaim and pressure thresholds, not notebook or freshness checks. Defaults to false." })),
+});
 const MAINTENANCE_CUSTOM_TYPE = "note-context/maintenance";
 /** Custom type of the per-request status message written by versions ≤ 0.3; filtered out of context, never written. */
 const LEGACY_STATUS_CUSTOM_TYPE = "note-context/status";
@@ -272,35 +274,41 @@ export default function noteContext(pi: ExtensionAPI): void {
     promptSnippet: NEW_CONTEXT_SNIPPET,
     promptGuidelines: NEW_CONTEXT_GUIDELINES,
     parameters: NewContextParams,
-    async execute(_id, _params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const reason = params.userRequested === true ? "user" : "model";
       const branch = branchOf(ctx);
       const notebook = notebookOf(ctx);
       const window = currentWindow(branch);
-      if (externalOwner(ctx)) {
-        // Owner produces the summary; we only validate that notes exist and schedule.
+      const external = externalOwner(ctx);
+      if (external && reason === "model" && pendingRollover?.reason !== "user") {
+        // Preserve the existing owner-controlled model path, without overwriting a
+        // user schedule. User requests still run the structural gate below; the
+        // owner continues to produce the summary.
         if (notebook.revision === 0) return fail("no notebook on this branch — write notes first.");
-        pendingRollover = { reason: "model", requestedAtLeaf: ctx.sessionManager.getLeafId() };
-        appendLedger({ kind: "gate", session: sessionId(ctx), window, ok: true });
+        pendingRollover = { reason, requestedAtLeaf: ctx.sessionManager.getLeafId() };
+        appendLedger({ kind: "gate", session: sessionId(ctx), window, reason, ok: true });
         return text(`rollover scheduled (external compaction owner for ${modelKey(ctx)}): window #${window} → #${window + 1} at the end of this turn. End the turn now without further tool calls.`, { external: true });
       }
-      // A host schedule does not count as "already pending": the model's own call runs the model
-      // gate (freshness, reclaim) and, if it passes, confirms the schedule as a model request, so
-      // a later host-only blocker (pressure floor, external owner) no longer cancels it.
+      // A host schedule can be confirmed by a model or user request. Re-run the
+      // request's gate so freshness is still checked; a later host-only blocker
+      // (pressure floor, external owner) no longer cancels the confirmed schedule.
       const confirmingHost = pendingRollover?.reason === "host";
       const verdict = evaluateGate({
         branch: contextOf(ctx),
+        reason,
         notebook,
         settings: { keepRecentTokens: compactionSettings(ctx).keepRecentTokens },
         minReclaimTokens: config.minReclaimTokens,
         pending: pendingRollover !== null && !confirmingHost,
         summaryTokens: summaryTokenEstimate(ctx, notebook),
       });
-      appendLedger({ kind: "gate", session: sessionId(ctx), window, ok: verdict.ok, ...(verdict.ok ? { reclaim: verdict.reclaimTokens } : { blocker: verdict.blocker, reclaim: verdict.reclaimTokens }) });
+      appendLedger({ kind: "gate", session: sessionId(ctx), window, reason: verdict.reason, ok: verdict.ok, ...(verdict.ok ? { reclaim: verdict.reclaimTokens } : { blocker: verdict.blocker, reclaim: verdict.reclaimTokens }) });
       if (!verdict.ok) return fail(`new_context refused: ${verdict.message}`);
-      pendingRollover = { reason: "model", requestedAtLeaf: ctx.sessionManager.getLeafId() };
+      pendingRollover = { reason: verdict.reason, requestedAtLeaf: ctx.sessionManager.getLeafId() };
+      if (external) return text(`rollover scheduled (external compaction owner for ${modelKey(ctx)}): window #${window} → #${window + 1} at the end of this turn. End the turn now without further tool calls.`, { external: true, reason: verdict.reason });
       return text(
         `rollover scheduled${confirmingHost ? " (confirms the host schedule)" : ""}: window #${window} → #${window + 1} at the end of this turn (~${Math.round(verdict.reclaimTokens / 1000)}K tokens reclaimed, ${verdict.droppedEntries} entries leave the window). End the turn now without further tool calls.`,
-        { reclaimTokens: verdict.reclaimTokens, droppedEntries: verdict.droppedEntries, confirmedHost: confirmingHost },
+        { reason: verdict.reason, reclaimTokens: verdict.reclaimTokens, droppedEntries: verdict.droppedEntries, confirmedHost: confirmingHost },
       );
     },
   });
@@ -317,6 +325,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     const usage = ctx.getContextUsage();
     return evaluateGate({
       branch: contextOf(ctx),
+      reason: "host",
       notebook,
       settings: { keepRecentTokens: compactionSettings(ctx).keepRecentTokens },
       minReclaimTokens: config.minReclaimTokens,
@@ -332,11 +341,11 @@ export default function noteContext(pi: ExtensionAPI): void {
     const window = currentWindow(branchOf(ctx));
     const verdict = hostGate(ctx, notebook);
     if (!verdict.ok) {
-      if (verdict.blocker === "low_pressure") appendLedger({ kind: "gate", session: sessionId(ctx), window, ok: false, blocker: verdict.blocker, auto: true });
+      if (verdict.blocker === "low_pressure") appendLedger({ kind: "gate", session: sessionId(ctx), window, reason: "host", ok: false, blocker: verdict.blocker, auto: true });
       return "";
     }
     pendingRollover = { reason: "host", requestedAtLeaf: ctx.sessionManager.getLeafId() };
-    appendLedger({ kind: "gate", session: sessionId(ctx), window, ok: true, reclaim: verdict.reclaimTokens, auto: true });
+    appendLedger({ kind: "gate", session: sessionId(ctx), window, reason: verdict.reason, ok: true, reclaim: verdict.reclaimTokens, auto: true });
     return `\nRollover scheduled by the host: window #${window} → #${window + 1} at the end of this turn (~${Math.round(verdict.reclaimTokens / 1000)}K tokens reclaimed). Finish what this turn needs; the new window opens with these notes.`;
   }
 
@@ -455,7 +464,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   });
 
   // --------------------------------------- scheduled rollover + pressure watch
-  // A model- or host-requested rollover runs once the agent run has settled: the model
+  // A model-, user- or host-requested rollover runs once the agent run has settled: the model
   // was told to end its turn after new_context, and ctx.compact() aborts any
   // in-flight run, so this is the only safe moment. pendingRollover is cleared
   // synchronously before compact() to make the schedule idempotent.
@@ -468,8 +477,8 @@ export default function noteContext(pi: ExtensionAPI): void {
   // Handing a stale schedule to compaction would make session_before_compact decline the
   // template and fall through to Pi's LLM summary — the outcome the host path exists to
   // avoid. A failed re-check cancels the schedule and records the blocker; the next notes
-  // write re-arms it. The model path is not re-checked: the model's new_context call is the
-  // judgment, and session_before_compact still guards the template on a stale notebook.
+  // write re-arms it. Model/user requests are not re-checked for economics: the tool
+  // call is the judgment, and session_before_compact still guards template freshness.
   //
   // The same re-check also runs at turn_end (below) so that a host schedule which went stale
   // inside the run is cancelled before it can mask the pressure maintenance for that turn.
@@ -486,7 +495,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   }
 
   pi.on("agent_settled", async (_event, ctx) => {
-    if (!pendingRollover || (pendingRollover.reason !== "model" && pendingRollover.reason !== "host")) return;
+    if (!pendingRollover || (pendingRollover.reason !== "model" && pendingRollover.reason !== "user" && pendingRollover.reason !== "host")) return;
     if (cancelHostScheduleIfStale(ctx)) return;
     const reason = pendingRollover.reason;
     pendingRollover = null;

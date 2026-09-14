@@ -6,6 +6,9 @@
 
 import { findCutPoint, estimateTokens, sessionEntryToContextMessages, type CompactionSettings, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { Notebook } from "./notebook.ts";
+import type { RolloverReason } from "./rollover.ts";
+
+export type GateReason = Extract<RolloverReason, "model" | "user" | "host">;
 
 export interface GateInput {
   /** Compaction-aware active context entries (ctx.sessionManager.buildContextEntries()): latest compaction entry, its retained tail, then newer entries. */
@@ -14,6 +17,8 @@ export interface GateInput {
   settings: Required<Pick<CompactionSettings, "keepRecentTokens">>;
   minReclaimTokens: number;
   pending: boolean;
+  /** Only an explicit user request bypasses the reclaim and pressure thresholds. */
+  reason?: GateReason;
   /** Estimated tokens of the template summary that will replace the dropped range. */
   summaryTokens: number;
   /**
@@ -22,13 +27,15 @@ export interface GateInput {
    * provider prefix cache (25× read price on some providers) and is only worth it when the
    * window is substantially used; at task end with a mostly empty window it is pure cost.
    * Omit for the model-initiated path: the model calling new_context is the judgment.
+   * Explicit user requests ignore this input even if supplied.
    */
   pressure?: { tokens: number; budgetTokens: number; floorPercent: number };
 }
 
-export type GateVerdict =
+export type GateVerdict = { reason: GateReason } & (
   | { ok: true; firstKeptEntryId: string; reclaimTokens: number; droppedEntries: number }
-  | { ok: false; blocker: "already_pending" | "no_notebook" | "stale_notebook" | "nothing_to_drop" | "low_reclaim" | "low_pressure"; message: string; reclaimTokens?: number };
+  | { ok: false; blocker: "already_pending" | "no_notebook" | "stale_notebook" | "nothing_to_drop" | "low_reclaim" | "low_pressure"; message: string; reclaimTokens?: number }
+);
 
 /**
  * Index where the droppable range starts inside the active context entries.
@@ -57,18 +64,19 @@ export function estimateRange(branch: readonly SessionEntry[], from: number, to:
 }
 
 export function evaluateGate(input: GateInput): GateVerdict {
-  if (input.pending) return { ok: false, blocker: "already_pending", message: "rollover already scheduled for the end of this turn." };
-  if (input.notebook.revision === 0) return { ok: false, blocker: "no_notebook", message: "no notebook on this branch — write notes first." };
-  if (input.pressure && input.pressure.budgetTokens > 0) {
+  const reason = input.reason ?? (input.pressure ? "host" : "model");
+  if (input.pending) return { ok: false, reason, blocker: "already_pending", message: "rollover already scheduled for the end of this turn." };
+  if (input.notebook.revision === 0) return { ok: false, reason, blocker: "no_notebook", message: "no notebook on this branch — write notes first." };
+  if (reason !== "user" && input.pressure && input.pressure.budgetTokens > 0) {
     const percent = Math.round((input.pressure.tokens / input.pressure.budgetTokens) * 100);
     if (percent < input.pressure.floorPercent) {
-      return { ok: false, blocker: "low_pressure", message: `window at ${percent}% of budget; the host rolls over on its own from ${input.pressure.floorPercent}% — call new_context yourself if a fresh window is worth it now.` };
+      return { ok: false, reason, blocker: "low_pressure", message: `window at ${percent}% of budget; the host rolls over on its own from ${input.pressure.floorPercent}% — call new_context yourself if a fresh window is worth it now.` };
     }
   }
 
   const { firstKeptEntryId, firstKeptIndex, start } = projectCut(input.branch, input.settings.keepRecentTokens);
   if (!firstKeptEntryId || firstKeptIndex <= start) {
-    return { ok: false, blocker: "nothing_to_drop", message: "nothing would leave the window: the whole window fits inside the retained recent tail." };
+    return { ok: false, reason, blocker: "nothing_to_drop", message: "nothing would leave the window: the whole window fits inside the retained recent tail." };
   }
 
   // Freshness: the notebook's reviewedThrough must be at or after the last entry that would be dropped.
@@ -78,6 +86,7 @@ export function evaluateGate(input: GateInput): GateVerdict {
     const unreviewed = dropEnd - Math.max(reviewedIdx, start - 1);
     return {
       ok: false,
+      reason,
       blocker: "stale_notebook",
       message: `notebook predates material that would be dropped (${unreviewed} entr${unreviewed === 1 ? "y" : "ies"} after the last review) — update notes or call notes({reviewed:true}) after checking them.`,
     };
@@ -85,13 +94,14 @@ export function evaluateGate(input: GateInput): GateVerdict {
 
   const dropped = estimateRange(input.branch, start, firstKeptIndex);
   const reclaim = dropped - input.summaryTokens;
-  if (reclaim < input.minReclaimTokens) {
+  if (reason !== "user" && reclaim < input.minReclaimTokens) {
     return {
       ok: false,
+      reason,
       blocker: "low_reclaim",
       reclaimTokens: reclaim,
       message: `rollover would reclaim ~${Math.max(0, Math.round(reclaim / 1000))}K tokens; below the ${Math.round(input.minReclaimTokens / 1000)}K threshold — continue working.`,
     };
   }
-  return { ok: true, firstKeptEntryId, reclaimTokens: reclaim, droppedEntries: firstKeptIndex - start };
+  return { ok: true, reason, firstKeptEntryId, reclaimTokens: reclaim, droppedEntries: firstKeptIndex - start };
 }

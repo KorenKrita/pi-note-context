@@ -6,14 +6,16 @@
 import { appendFile, mkdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import type { GateReason } from "./gate.ts";
+import type { RolloverReason } from "./rollover.ts";
 
 export const LEDGER_MAX_BYTES = 8 * 1024 * 1024;
 
 export type LedgerRow =
   | { kind: "notes_write"; session: string; window: number; revision: number; bytes: number; reviewOnly: boolean }
   | { kind: "notes_rejected"; session: string; window: number; reason: string }
-  | { kind: "gate"; session: string; window: number; ok: boolean; blocker?: string; reclaim?: number; auto?: boolean }
-  | { kind: "rollover"; session: string; fromWindow: number; reason: string; notebookRevision: number; reclaim: number | null; pinned: number }
+  | { kind: "gate"; session: string; window: number; reason: GateReason; ok: boolean; blocker?: string; reclaim?: number; auto?: boolean }
+  | { kind: "rollover"; session: string; fromWindow: number; reason: RolloverReason; notebookRevision: number; reclaim: number | null; pinned: number }
   | { kind: "rollover_declined"; session: string; window: number; why: string }
   /** A host-scheduled rollover failed the host gate again at settle time (`why` = gate blocker or `external_owner`); no compaction ran. */
   | { kind: "rollover_cancelled"; session: string; window: number; reason: string; why: string }

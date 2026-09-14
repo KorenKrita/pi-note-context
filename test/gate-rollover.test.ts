@@ -66,6 +66,38 @@ describe("gate", () => {
     expect(evaluateGate(base).ok).toBe(true);
   });
 
+  test("user reason skips only the reclaim and pressure economics, while preserving estimates", () => {
+    const branch = longWindow({ reviewedAfterDrop: true });
+    const base = { branch, notebook: reconstructNotebook(branch), settings: { keepRecentTokens: KEEP }, minReclaimTokens: 100_000, pending: false, summaryTokens: 500 };
+    const model = evaluateGate(base);
+    expect(!model.ok && model.blocker).toBe("low_reclaim");
+    const pressure = { tokens: 84_000, budgetTokens: 400_000, floorPercent: 50 };
+    const host = evaluateGate({ ...base, pressure });
+    expect(!host.ok && host.blocker).toBe("low_pressure");
+    const verdict = evaluateGate({ ...base, pressure, reason: "user" });
+    expect(verdict.ok).toBe(true);
+    expect(verdict.reason).toBe("user");
+    expect(verdict.reclaimTokens).toBe(model.reclaimTokens);
+    expect(verdict.reclaimTokens).toBeLessThan(base.minReclaimTokens);
+  });
+
+  test("user reason still refuses missing/stale notes, duplicate schedules, and a window with nothing to drop", () => {
+    const fresh = longWindow({ reviewedAfterDrop: true });
+    const missing = fresh.filter((e) => e.type !== "custom");
+    const stale = longWindow({ reviewedAfterDrop: false });
+    const tiny = [user("u1", "hi"), notebookEntry("n1", 1, { Task: "x" }, "u1")];
+    for (const [branch, pending, blocker] of [
+      [missing, false, "no_notebook"],
+      [stale, false, "stale_notebook"],
+      [fresh, true, "already_pending"],
+      [tiny, false, "nothing_to_drop"],
+    ] as const) {
+      const verdict = evaluateGate({ branch, notebook: reconstructNotebook(branch), settings: { keepRecentTokens: KEEP }, minReclaimTokens: 100_000, summaryTokens: 500, pending, reason: "user", pressure: { tokens: 1, budgetTokens: 400_000, floorPercent: 50 } });
+      expect(!verdict.ok && verdict.blocker).toBe(blocker);
+      expect(verdict.reason).toBe("user");
+    }
+  });
+
   test("context entries: droppable range starts after the leading compaction entry and includes its retained tail", () => {
     // buildContextEntries() shape: [compaction, ...retained tail, ...newer]
     const context: SessionEntry[] = [rolloverEntry("r1", "t8", 2), ...round(8, 60), ...round(9, 60), notebookEntry("n2", 2, { Task: "t" }, "a9"), ...round(10, 1)];

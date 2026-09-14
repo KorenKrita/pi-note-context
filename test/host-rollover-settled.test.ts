@@ -90,8 +90,8 @@ function harness(config: Record<string, unknown> = {}) {
     const r = await tools.get("notes")!.execute("call", params, undefined, undefined, ctx);
     return r.content.map((c) => c.text).join("\n");
   };
-  const newContext = async () => {
-    const r = await tools.get("new_context")!.execute("call", {}, undefined, undefined, ctx);
+  const newContext = async (params: unknown = {}) => {
+    const r = await tools.get("new_context")!.execute("call", params, undefined, undefined, ctx);
     return r.content.map((c) => c.text).join("\n");
   };
   /** turn_end for an assistant message, as Pi emits it after every assistant response. */
@@ -243,5 +243,114 @@ describe("host schedule vs. pressure maintenance and model confirmation", () => 
     await h.notes({ sections: { Task: "parser", Next: "x" } });
     await h.newContext();
     await expect(h.newContext()).rejects.toThrow(/already scheduled/);
+  });
+
+  test("external owner ordinary model requests preserve legacy re-confirmation without a second compaction", async () => {
+    const h = harness({ externalCompactionModels: ["p/m"], minReclaimTokens: 40_000 });
+    expect(await h.newContext()).toContain("external compaction owner");
+    expect(await h.newContext({ userRequested: false })).toContain("external compaction owner");
+    await h.emit("agent_settled");
+    await h.emit("agent_settled");
+    expect(h.compactCalls).toHaveLength(1);
+    const gates = (await h.ledgerRows()).filter((r) => r["kind"] === "gate");
+    expect(gates.map((r) => [r["reason"], r["ok"]])).toEqual([["model", true], ["model", true]]);
+  });
+});
+
+describe("user-requested rollover", () => {
+  test("explicit user request bypasses low reclaim and retains reason through compaction", async () => {
+    const h = harness({ minReclaimTokens: 40_000 });
+    h.usage.tokens = 84_000; // below the host pressure floor
+    await h.notes({ sections: { Task: "parser", Next: "x" } });
+    await expect(h.newContext()).rejects.toThrow(/below the 40K threshold/);
+    await expect(h.newContext({ userRequested: false })).rejects.toThrow(/below the 40K threshold/);
+    expect(await h.newContext({ userRequested: true })).toContain("rollover scheduled");
+    await h.emit("agent_settled");
+    expect(h.compactCalls).toHaveLength(1);
+    const [result] = await h.emit("session_before_compact", {
+      reason: "manual",
+      preparation: { firstKeptEntryId: "a10", tokensBefore: 84_000 },
+    });
+    const { compaction } = result as { compaction: { details: { reason: string }; summary: string } };
+    expect(compaction.details.reason).toBe("user");
+    expect(compaction.summary).toContain("rollover reason: user");
+    expect((await h.ledgerRows()).filter((r) => r["kind"] === "gate" && r["ok"] === true)).toContainEqual(
+      expect.objectContaining({ reason: "user" }),
+    );
+    expect((await h.ledgerRows()).filter((r) => r["kind"] === "rollover")).toContainEqual(
+      expect.objectContaining({ reason: "user" }),
+    );
+  });
+
+  test.each([false, true])("user requests retain missing/stale notebook checks (external owner: %s)", async (external) => {
+    const h = harness({ autoRollover: false, externalCompactionModels: external ? ["p/m"] : [] });
+    const original = [...h.branch];
+    h.branch.splice(0, h.branch.length, ...original.filter((e) => e.type !== "custom"));
+    await expect(h.newContext({ userRequested: true })).rejects.toThrow(/no notebook/);
+    h.branch.splice(0, h.branch.length, ...original);
+    for (let i = 20; i <= 31; i++) h.branch.push(...round(i, 20));
+    await expect(h.newContext({ userRequested: true })).rejects.toThrow(/notebook predates/);
+    await h.emit("agent_settled");
+    expect(h.compactCalls).toHaveLength(0);
+    const rows = (await h.ledgerRows()).filter((r) => r["kind"] === "gate");
+    expect(rows.map((r) => [r["reason"], r["ok"], r["blocker"]])).toEqual([
+      ["user", false, "no_notebook"],
+      ["user", false, "stale_notebook"],
+    ]);
+  });
+
+  test("user request confirms a host schedule, keeps user attribution, and cannot schedule twice", async () => {
+    const h = harness();
+    expect(await h.notes({ sections: { Task: "parser", Next: "x" } })).toContain("Rollover scheduled by the host");
+    h.usage.tokens = 84_000;
+    expect(await h.newContext({ userRequested: true })).toContain("confirms the host schedule");
+    await expect(h.newContext({ userRequested: true })).rejects.toThrow(/already scheduled/);
+    await expect(h.newContext()).rejects.toThrow(/already scheduled/);
+    await h.emit("agent_settled");
+    await h.emit("agent_settled");
+    expect(h.compactCalls).toHaveLength(1);
+    await h.emit("session_before_compact", { reason: "manual", preparation: { firstKeptEntryId: "a10", tokensBefore: 84_000 } });
+    const rows = await h.ledgerRows();
+    expect(rows.find((r) => r["kind"] === "rollover")?.["reason"]).toBe("user");
+    expect(rows.some((r) => r["kind"] === "rollover_cancelled")).toBe(false);
+    h.compactCalls[0]!.onComplete?.();
+    expect(h.sent.some((m) => m.customType === "note-context/continue")).toBe(true);
+  });
+
+  test("user request does not bypass freshness against the actual compaction cut", async () => {
+    const h = harness({ autoRollover: false, minReclaimTokens: 40_000 });
+    await h.notes({ reviewed: true });
+    await h.newContext({ userRequested: true });
+    for (let i = 20; i <= 31; i++) h.branch.push(...round(i, 20));
+    await h.emit("agent_settled");
+    const results = await h.emit("session_before_compact", { reason: "manual", preparation: { firstKeptEntryId: "a31", tokensBefore: 150_000 } });
+    expect(results).toEqual([undefined]);
+    expect((await h.ledgerRows()).find((r) => r["kind"] === "rollover_declined")?.["why"]).toBe("stale_notebook_at_cut");
+  });
+
+  test("user request still yields the summary to an external compaction owner", async () => {
+    const h = harness({ externalCompactionModels: ["p/m"], minReclaimTokens: 40_000 });
+    await h.notes({ reviewed: true });
+    expect(await h.newContext({ userRequested: true })).toContain("external compaction owner");
+    await expect(h.newContext()).rejects.toThrow(/already scheduled/);
+    await expect(h.newContext({ userRequested: true })).rejects.toThrow(/already scheduled/);
+    await h.emit("agent_settled");
+    expect(h.compactCalls).toHaveLength(1);
+    expect(await h.emit("session_before_compact", { reason: "manual", preparation: { firstKeptEntryId: "a10", tokensBefore: 84_000 } })).toEqual([undefined]);
+    expect((await h.ledgerRows()).find((r) => r["kind"] === "gate" && r["ok"] === true)?.["reason"]).toBe("user");
+    expect((await h.ledgerRows()).some((r) => r["kind"] === "rollover")).toBe(false);
+  });
+
+  test.each([false, true])("user request still yields to customInstructions (external owner: %s)", async (external) => {
+    const h = harness({ autoRollover: false, externalCompactionModels: external ? ["p/m"] : [] });
+    await h.newContext({ userRequested: true });
+    await h.emit("agent_settled");
+    const results = await h.emit("session_before_compact", {
+      reason: "manual",
+      customInstructions: "Focus on the parser API.",
+      preparation: { firstKeptEntryId: "a10", tokensBefore: 84_000 },
+    });
+    expect(results).toEqual([undefined]);
+    expect((await h.ledgerRows()).some((r) => r["kind"] === "rollover")).toBe(false);
   });
 });

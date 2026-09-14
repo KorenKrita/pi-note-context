@@ -8,7 +8,7 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { ROLLOVER_DETAILS_KIND } from "./history.ts";
 import { renderNotebook, type Notebook } from "./notebook.ts";
 
-export type RolloverReason = "model" | "host" | "threshold" | "fallback";
+export type RolloverReason = "model" | "user" | "host" | "threshold" | "fallback";
 
 export interface RolloverDetails {
   kind: typeof ROLLOVER_DETAILS_KIND;
