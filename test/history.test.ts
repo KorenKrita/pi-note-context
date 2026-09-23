@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ToolCall } from "@earendil-works/pi-ai";
 import { currentWindow, indexBranch, list, read, renderRead, ROLLOVER_DETAILS_KIND, search } from "../src/history.ts";
 import { NOTEBOOK_ENTRY_TYPE } from "../src/notebook.ts";
 
@@ -15,7 +16,7 @@ const assistant = (id: string, text: string, call?: { name: string; args: unknow
     content: [
       { type: "thinking", thinking: "SECRET-THOUGHT" },
       { type: "text", text },
-      ...(call ? [{ type: "toolCall" as const, id: "c1", name: call.name, arguments: call.args as Record<string, unknown> }] : []),
+      ...(call ? [{ type: "toolCall" as const, id: "c1", name: call.name, arguments: call.args as ToolCall["arguments"] }] : []),
     ],
     api: "openai-responses",
     provider: "p",

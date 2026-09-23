@@ -263,7 +263,7 @@ src/
 test/
 ```
 
-Pi peer version: `0.85.x`. Tests: Bun. Host fixture on real Pi for: gate blockers, rollover summary contents, fallback state machine, branch reconstruction, both load orders with an external compaction owner.
+Pi peer version: `0.87.x`. Tests: Bun. Host fixture on real Pi for: gate blockers, rollover summary contents, fallback state machine, branch reconstruction, both load orders with an external compaction owner.
 
 ## 13. Ship order
 

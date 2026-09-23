@@ -1,4 +1,5 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ToolCall } from "@earendil-works/pi-ai";
 import { ROLLOVER_DETAILS_KIND } from "../src/history.ts";
 import { NOTEBOOK_ENTRY_TYPE } from "../src/notebook.ts";
 
@@ -17,7 +18,7 @@ export const assistant = (id: string, text: string, calls: { id: string; name: s
   type: "message",
   message: {
     role: "assistant",
-    content: [{ type: "text", text }, ...calls.map((c) => ({ type: "toolCall" as const, id: c.id, name: c.name, arguments: c.args }))],
+    content: [{ type: "text", text }, ...calls.map((c) => ({ type: "toolCall" as const, id: c.id, name: c.name, arguments: c.args as ToolCall["arguments"] }))],
     api: "openai-responses",
     provider: "p",
     model: "m",

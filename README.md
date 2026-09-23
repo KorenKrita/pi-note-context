@@ -64,7 +64,7 @@ Ledger: `~/.pi/agent/state/note-context-ledger.jsonl` (counts and ids only). Dis
 pi install git:github.com/KorenKrita/pi-note-context
 ```
 
-Requires Pi `>=0.85.0 <0.86.0`.
+Requires Pi `>=0.87.0 <0.88.0`.
 
 ## Develop
 
