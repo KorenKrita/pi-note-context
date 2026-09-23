@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type, fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "note-context-host-"));
 const savedDir = process.env["PI_CODING_AGENT_DIR"];
@@ -19,7 +19,7 @@ afterAll(() => {
 });
 let runs = 0;
 
-async function host(responses: (seen: TranscriptContext[]) => FauxResponseStep[], config: Record<string, unknown> = {}, contextWindow = 200_000) {
+async function host(responses: (seen: TranscriptContext[]) => FauxResponseStep[], config: Record<string, unknown> = {}, contextWindow = 200_000, before: ExtensionFactory[] = []) {
   const agentDir = join(tmpRoot, `agent-${++runs}`);
   mkdirSync(agentDir, { recursive: true });
   writeFileSync(join(agentDir, "pi-note-context.json"), JSON.stringify(config));
@@ -34,6 +34,7 @@ async function host(responses: (seen: TranscriptContext[]) => FauxResponseStep[]
   const resourceLoader = new DefaultResourceLoader({
     cwd: tmpRoot, agentDir, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     extensionFactories: [
+      ...before,
       noteContext,
       (pi) =>
         pi.registerTool({
@@ -73,6 +74,19 @@ describe("Pi host integration", () => {
     const system = seen[0]!.messages[0] as { role: string; sections?: Record<string, string> };
     expect(system.role).toBe("system");
     expect(system.sections?.["note_context"]).toContain("Working notes across context windows");
+  });
+
+  test("guidance still reaches the provider when an earlier extension forces the whole system prompt", async () => {
+    const { session, seen } = await host((s) => [record(s, fauxAssistantMessage("ok"))], {}, 200_000, [
+      (pi) => {
+        pi.on("before_agent_start", () => ({ systemPrompt: "FORCED BASE" }));
+      },
+    ]);
+    await session.prompt("hello");
+    session.dispose();
+    const text = JSON.stringify(seen[0]!.messages);
+    expect(text).toContain("FORCED BASE");
+    expect(text.split("Working notes across context windows")).toHaveLength(2);
   });
 
   const text = (ctx: TranscriptContext) => JSON.stringify(ctx.messages);

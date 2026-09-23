@@ -724,7 +724,11 @@ export default function noteContext(pi: ExtensionAPI): void {
   // a whole-prompt replacement, which drops section changes made by extensions loaded later and
   // prevents Pi from recording the change as a transcript delta.
   pi.on("before_agent_start", async (event) => {
+    // An earlier handler forced the whole prompt: sections are not rendered, so append to it.
+    const forced = event.systemPromptOptions.forceSystemPrompt;
+    if (forced !== undefined) return forced.includes(SYSTEM_PROMPT_SECTION) ? undefined : { systemPrompt: `${forced}\n\n${SYSTEM_PROMPT_SECTION}` };
     event.systemPromptOptions.sections = { ...event.systemPromptOptions.sections, note_context: SYSTEM_PROMPT_SECTION };
+    return undefined;
   });
 
   pi.on("context", async (event, ctx) => {
