@@ -582,7 +582,12 @@ export default function noteContext(pi: ExtensionAPI): void {
   });
 
   // ---------------------------------------------------- guidance + context
-  pi.on("before_agent_start", async (event) => ({ systemPrompt: `${event.systemPrompt}\n\n${SYSTEM_PROMPT_SECTION}` }));
+  // Add a structured prompt section instead of returning `systemPrompt`: a returned prompt forces
+  // a whole-prompt replacement, which drops section changes made by extensions loaded later and
+  // prevents Pi from recording the change as a transcript delta.
+  pi.on("before_agent_start", async (event) => {
+    event.systemPromptOptions.sections = { ...event.systemPromptOptions.sections, note_context: SYSTEM_PROMPT_SECTION };
+  });
 
   pi.on("context", async (event, ctx) => {
     const branch = branchOf(ctx);

@@ -184,7 +184,7 @@ Tool dispatch enforcement during `maintenance:requested`: a `tool_call` handler 
 
 ## 7. Guidance to the model
 
-Appended to the system prompt via `before_agent_start`. Final text:
+Added to the system prompt as the `note_context` section of `systemPromptOptions.sections` in `before_agent_start` (not a returned `systemPrompt`, which would force a whole-prompt replacement). Final text:
 
 > **Working notes across context windows.** Keep a compact checkpoint in `notes`: the task and its binding constraints, observed state (label `untested`, `inferred`, `blocked`), decisions with one-line reasons and ruled-out directions, the next action, and exact references (`[history entry=…]`, file:line, commands). Update it after meaningful batches of work and when the status line (a `[note-context]` line at the end of a tool result: context tokens used, and tokens added since your last notes review) or a reminder shows it is stale — not after every edit.
 >
