@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { flushLedger } from "../src/ledger.ts";
+import { ROLLOVER_DETAILS_KIND } from "../src/history.ts";
 import { notebookEntry, round, user } from "./fixtures.ts";
 
 // One OS temp root per run; each harness gets its own agent dir under it so config and ledger
@@ -101,18 +102,28 @@ function harness(config: Record<string, unknown> = {}) {
   };
   /** Compaction entries our handlers proposed at actionable boundaries (turn_end, agent_before_settle). */
   const boundary: { reason: string; drafts: { type: string; customType?: string; details?: { reason?: string } }[] }[] = [];
+  /** Pi's boundary commit: set `pi.rejectBoundary` to model a later handler invalidating the proposal. */
+  const piHost = { rejectBoundary: false, otherCompaction: false };
+  let committed = 0;
   const collect = (reason: string, results: unknown[]) => {
     for (const r of results) {
-      const drafts = (r as { entries?: { type: string }[] } | undefined)?.entries;
-      if (drafts?.some((d) => d.type === "compaction")) boundary.push({ reason, drafts });
+      const drafts = (r as { entries?: { type: string; details?: { reason?: string } }[] } | undefined)?.entries;
+      if (!drafts?.some((d) => d.type === "compaction")) continue;
+      boundary.push({ reason, drafts });
+      if (piHost.rejectBoundary) continue;
+      for (const d of drafts) {
+        if (d.type === "compaction") branch.push({ id: `cmp${++committed}`, parentId: null, timestamp: new Date().toISOString(), type: "compaction", summary: "", firstKeptEntryId: "a10", tokensBefore: 0, details: d.details } as SessionEntry);
+      }
     }
   };
+  /** An earlier extension's compaction draft already in event.entries. */
+  const earlier = () => (piHost.otherCompaction ? [{ type: "compaction", summary: "OTHER", firstKeptEntryId: null }] : []);
   /** turn_end for an assistant message, as Pi emits it after every assistant response. */
   const turnEnd = async (message: Record<string, unknown> = { role: "assistant" }, outcome = "completed") =>
-    collect("turn_end", await emit("turn_end", { message, entries: [], continue: false, outcome }));
+    collect("turn_end", await emit("turn_end", { message, entries: earlier(), continue: false, outcome }));
   /** Pi's settle sequence: the actionable agent_before_settle boundary, then agent_settled. */
   const settle = async (outcome = "completed") => {
-    collect("agent_before_settle", await emit("agent_before_settle", { entries: [], continue: false, outcome }));
+    collect("agent_before_settle", await emit("agent_before_settle", { entries: earlier(), continue: false, outcome }));
     await emit("agent_settled");
   };
   /** Rollovers started either way: boundary compaction drafts plus ctx.compact() calls. */
@@ -132,7 +143,7 @@ function harness(config: Record<string, unknown> = {}) {
     run.controller = new AbortController();
     await emit("agent_start");
   };
-  return { branch, ctx, usage, state, emit, notes, newContext, turnEnd, settle, boundary, compactions, sent, compactCalls, ledgerRows, abort, startRun };
+  return { branch, ctx, usage, state, emit, notes, newContext, turnEnd, settle, boundary, compactions, piHost, sent, compactCalls, ledgerRows, abort, startRun };
 }
 
 describe("host rollover: re-check at agent_settled", () => {
@@ -466,5 +477,66 @@ describe("split thresholds: reminder budget vs. fallback budget", () => {
     h.usage.tokens = 780_000;
     await h.turnEnd();
     expect(h.sent.some((m) => m.customType === "note-context/maintenance")).toBe(true);
+  });
+});
+
+describe("boundary rollover interop (review 2026-09-23)", () => {
+  /** Fallback zone + stale host schedule → maintenance request, as in the fallback test above. */
+  async function intoMaintenance(config: Record<string, unknown> = {}) {
+    const h = harness(config);
+    h.usage.tokens = 375_000;
+    await h.turnEnd();
+    expect(h.sent.some((m) => m.customType === "note-context/maintenance")).toBe(true);
+    return h;
+  }
+
+  test("fallback with an external compaction owner goes through ctx.compact(), not a template boundary", async () => {
+    const h = await intoMaintenance({ externalCompactionModels: ["p/m"] });
+    await h.notes({ sections: { Next: "checkpoint under pressure" } });
+    expect(h.compactCalls.length).toBe(1);
+    await h.turnEnd();
+    expect(h.boundary.length).toBe(0);
+    h.compactCalls[0]!.onComplete?.();
+    expect(h.sent.some((m) => m.customType === "note-context/continue")).toBe(true);
+  });
+
+  test("fallback yields to another extension's compaction at the same turn_end", async () => {
+    const h = await intoMaintenance();
+    await h.notes({ sections: { Next: "checkpoint under pressure" } });
+    h.piHost.otherCompaction = true;
+    await h.turnEnd();
+    expect(h.boundary.length).toBe(0);
+    expect((await h.ledgerRows()).find((r) => r["kind"] === "rollover_cancelled")?.["why"]).toBe("other_compaction");
+  });
+
+  test("a scheduled rollover satisfied by another extension's settle compaction is not compacted again", async () => {
+    const h = harness();
+    expect(await h.notes({ sections: { Task: "parser", Next: "x" } })).toContain("Rollover scheduled by the host");
+    h.piHost.otherCompaction = true;
+    await h.settle();
+    expect(h.compactions()).toBe(0);
+    expect((await h.ledgerRows()).find((r) => r["kind"] === "rollover_cancelled")?.["why"]).toBe("other_compaction");
+  });
+
+  test("a rejected boundary proposal records no rollover and hands the schedule to Pi's compaction", async () => {
+    const h = harness();
+    await h.notes({ sections: { Task: "parser", Next: "x" } });
+    h.piHost.rejectBoundary = true;
+    await h.settle();
+    expect(h.boundary.length).toBe(1); // proposed …
+    expect(h.compactCalls.length).toBe(1); // … dropped by Pi → agent_settled compacts through Pi
+    const rows = await h.ledgerRows();
+    expect(rows.some((r) => r["kind"] === "rollover")).toBe(false);
+    expect(rows.find((r) => r["kind"] === "rollover_failed")?.["why"]).toBe("boundary_rejected");
+  });
+
+  test("a committed proposal writes the rollover row only once it is persisted", async () => {
+    const h = harness();
+    await h.notes({ sections: { Task: "parser", Next: "x" } });
+    await h.emit("agent_before_settle", { entries: [], continue: false, outcome: "completed" });
+    expect((await h.ledgerRows()).some((r) => r["kind"] === "rollover")).toBe(false);
+    h.branch.push({ id: "cmpX", parentId: null, timestamp: new Date().toISOString(), type: "compaction", summary: "", firstKeptEntryId: "a10", tokensBefore: 0, details: { kind: ROLLOVER_DETAILS_KIND } } as SessionEntry);
+    await h.emit("turn_start");
+    expect((await h.ledgerRows()).filter((r) => r["kind"] === "rollover")).toHaveLength(1);
   });
 });

@@ -67,11 +67,16 @@ export default function noteContext(pi: ExtensionAPI): void {
   const config: Config = loadConfig();
   if (!config.enabled) return;
 
+  const SCHEDULED_CONTINUE = "[note-context] New context window started. Continue with the notebook's Next action.";
+  const FALLBACK_CONTINUE = "[note-context] New context window started after the maintenance checkpoint. Continue with the notebook's Next action.";
+
   // ------------------------------------------------------------ volatile state
   // All of this is rebuilt from the journal or reset on session replacement.
   let branchChangedPending = false;
   let pendingRollover: { reason: RolloverReason; requestedAtLeaf: string | null } | null = null;
   let inFlightRollover: { reason: RolloverReason } | null = null;
+  /** A rollover proposed as boundary entries, not yet seen persisted (see reconcileProposal). */
+  let proposal: { reason: RolloverReason; afterLeaf: string | null; record: () => void } | null = null;
   /** The current run was aborted by the user (ESC). Seen on ctx.signal at turn_end/agent_end; cleared at agent_start. */
   let runAborted = false;
   let maintenance: MaintenanceState = { kind: "idle" };
@@ -86,6 +91,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     branchChangedPending = false;
     pendingRollover = null;
     inFlightRollover = null;
+    proposal = null;
     runAborted = false;
     maintenance = { kind: "idle" };
     reminderShownForWindow = null;
@@ -363,8 +369,28 @@ export default function noteContext(pi: ExtensionAPI): void {
     maintenance = r.state;
     if (r.action === "compact_now") {
       appendLedger({ kind: "maintenance", session: sessionId(ctx), window: currentWindow(branchOf(ctx)), action: "compact_now", attempt: maintenance.kind === "checkpointed" ? maintenance.attempt : 0 });
-      // Rolled over at this turn's turn_end boundary (the notes call's turn), without aborting the run.
-      pendingRollover = { reason: "fallback", requestedAtLeaf: ctx.sessionManager.getLeafId() };
+      if (!externalOwner(ctx)) {
+        // Rolled over at this turn's turn_end boundary (the notes call's turn), without aborting the run.
+        pendingRollover = { reason: "fallback", requestedAtLeaf: ctx.sessionManager.getLeafId() };
+        return;
+      }
+      // An external compaction owner writes the summary, so this goes through Pi's compaction.
+      // ctx.compact() aborts the in-flight run; a continuation resumes the task afterwards.
+      inFlightRollover = { reason: "fallback" };
+      ctx.compact({
+        onComplete: () => {
+          inFlightRollover = null;
+          pi.sendMessage(
+            { customType: "note-context/continue", content: FALLBACK_CONTINUE, display: true },
+            { deliverAs: "followUp", triggerTurn: true },
+          );
+        },
+        onError: (error) => {
+          maintenance = { kind: "idle" };
+          inFlightRollover = null;
+          appendLedger({ kind: "rollover_failed", session: sessionId(ctx), window: currentWindow(branchOf(ctx)), reason: "fallback", why: compactFailureCategory(error) });
+        },
+      });
     }
   }
   function onNotesFailed(ctx: ExtensionContext, error: string): void {
@@ -403,8 +429,9 @@ export default function noteContext(pi: ExtensionAPI): void {
   /**
    * The template rollover for a concrete cut, or null (ledger row written) when it must not be
    * used: no notebook, or the cut would drop material the notebook was not reviewed against.
+   * `record()` writes the rollover and window-cache ledger rows once the compaction is persisted.
    */
-  function templateRollover(ctx: ExtensionContext, context: readonly SessionEntry[], firstKeptEntryId: string, reason: RolloverReason): { summary: string; details: ReturnType<typeof makeDetails> } | null {
+  function templateRollover(ctx: ExtensionContext, context: readonly SessionEntry[], firstKeptEntryId: string, reason: RolloverReason): { summary: string; details: ReturnType<typeof makeDetails>; record: () => void } | null {
     const branch = branchOf(ctx);
     const notebook = reconstructNotebook(branch);
     const window = currentWindow(branch);
@@ -419,12 +446,15 @@ export default function noteContext(pi: ExtensionAPI): void {
       return null;
     }
     const pinned = pinUserMessages(droppedRange(context, firstKeptEntryId), config.pin);
-    appendLedger({ kind: "rollover", session: sessionId(ctx), fromWindow: window, reason, notebookRevision: notebook.revision, reclaim: null, pinned: pinned.length });
-    if (cacheAcc.calls > 0) {
-      appendLedger({ kind: "window_cache", session: sessionId(ctx), window, ...cacheAcc });
-      cacheAcc = { calls: 0, cacheRead: 0, input: 0 };
-    }
-    return { summary: renderRolloverSummary({ window: window + 1, reason, notebook, pinned }), details: makeDetails(window + 1, reason, notebook, pinned) };
+    const session = sessionId(ctx);
+    const record = () => {
+      appendLedger({ kind: "rollover", session, fromWindow: window, reason, notebookRevision: notebook.revision, reclaim: null, pinned: pinned.length });
+      if (cacheAcc.calls > 0) {
+        appendLedger({ kind: "window_cache", session, window, ...cacheAcc });
+        cacheAcc = { calls: 0, cacheRead: 0, input: 0 };
+      }
+    };
+    return { summary: renderRolloverSummary({ window: window + 1, reason, notebook, pinned }), details: makeDetails(window + 1, reason, notebook, pinned), record };
   }
 
   /** Volatile state for a freshly opened window. */
@@ -443,8 +473,9 @@ export default function noteContext(pi: ExtensionAPI): void {
    * compaction and the continuation message are persisted in order and Pi runs the next request
    * on the new window, with no abort and no follow-up race. Pi does not emit
    * session_before_compact / session_compact for boundary entries, so this path runs the
-   * template checks and the window reset itself. Returns null (ledger row written) when the
-   * template must not be used.
+   * template checks itself and leaves a proposal: a later handler can still replace the drafts
+   * or make the boundary invalid, so the window reset and ledger row wait for reconcileProposal.
+   * Returns null (ledger row written) when the template must not be used.
    */
   function boundaryRollover(ctx: ExtensionContext, reason: RolloverReason, continueText: string): SessionBoundaryDraft[] | null {
     const context = contextOf(ctx);
@@ -455,12 +486,40 @@ export default function noteContext(pi: ExtensionAPI): void {
     }
     const template = templateRollover(ctx, context, cut.firstKeptEntryId, reason);
     if (!template) return null;
-    onWindowOpened();
+    proposal = { reason, afterLeaf: ctx.sessionManager.getLeafId(), record: template.record };
     return [
       { type: "compaction", summary: template.summary, firstKeptEntryId: cut.firstKeptEntryId, details: template.details },
       { type: "custom_message", customType: "note-context/continue", content: continueText, display: true },
     ];
   }
+
+  /**
+   * Settle a boundary proposal at the next hook (turn_start of the continued request, or the
+   * settle hooks when Pi did not continue). Committed: our compaction is on the branch after the
+   * proposal's leaf → ledger row + window reset. Otherwise Pi dropped the drafts: a scheduled
+   * rollover keeps its schedule for agent_settled (Pi's compaction); a fallback hands the window
+   * to Pi's threshold compaction.
+   */
+  function reconcileProposal(ctx: ExtensionContext): void {
+    if (!proposal) return;
+    const p = proposal;
+    proposal = null;
+    const branch = branchOf(ctx);
+    const from = p.afterLeaf === null ? -1 : branch.findIndex((e) => e.id === p.afterLeaf);
+    const committed = (p.afterLeaf === null || from >= 0) && branch.slice(from + 1).some((e) => e.type === "compaction" && isRolloverDetails(e.details));
+    if (committed) {
+      p.record();
+      onWindowOpened();
+      return;
+    }
+    const window = currentWindow(branch);
+    appendLedger({ kind: "rollover_failed", session: sessionId(ctx), window, reason: p.reason, why: "boundary_rejected" });
+    if (p.reason === "fallback") {
+      maintenance = { kind: "idle" };
+      maintenanceExhaustedForWindow = window;
+    }
+  }
+  pi.on("turn_start", async (_event, ctx) => reconcileProposal(ctx));
 
   // Pi-driven compaction (threshold, manual /compact) and the external-owner path still arrive
   // here; the template replaces Pi's LLM summary when the notebook covers the cut.
@@ -477,6 +536,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     const reason: RolloverReason = inFlightRollover?.reason ?? (event.reason === "manual" ? "model" : "threshold");
     const template = templateRollover(ctx, contextOf(ctx), event.preparation.firstKeptEntryId, reason);
     if (!template) return undefined;
+    template.record();
     lastCompactionWasOurs = true;
     return { compaction: { summary: template.summary, firstKeptEntryId: event.preparation.firstKeptEntryId, tokensBefore: event.preparation.tokensBefore, details: template.details } };
   });
@@ -533,6 +593,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   const scheduled = (r: RolloverReason) => r === "model" || r === "user" || r === "host";
 
   pi.on("agent_before_settle", async (event, ctx) => {
+    reconcileProposal(ctx);
     if (!pendingRollover || !scheduled(pendingRollover.reason)) return undefined;
     // An external compaction owner writes the summary: agent_settled runs Pi's compaction.
     if (externalOwner(ctx)) return undefined;
@@ -544,9 +605,14 @@ export default function noteContext(pi: ExtensionAPI): void {
       return undefined;
     }
     if (cancelHostScheduleIfStale(ctx)) return undefined;
-    // Another extension already compacts at this boundary; leave the schedule to agent_settled.
-    if (event.entries.some((e) => e.type === "compaction")) return undefined;
-    const drafts = boundaryRollover(ctx, pendingRollover.reason, "[note-context] New context window started. Continue with the notebook's Next action.");
+    // Another extension already compacts at this boundary: that compaction opens the new window,
+    // so the schedule is satisfied rather than compacted a second time.
+    if (event.entries.some((e) => e.type === "compaction")) {
+      appendLedger({ kind: "rollover_cancelled", session: sessionId(ctx), window: currentWindow(branchOf(ctx)), reason: pendingRollover.reason, why: "other_compaction" });
+      pendingRollover = null;
+      return undefined;
+    }
+    const drafts = boundaryRollover(ctx, pendingRollover.reason, SCHEDULED_CONTINUE);
     // Declined (ledger row written): the schedule stays for agent_settled, which hands the
     // window to Pi's compaction exactly as before boundary rollovers existed.
     if (!drafts) return undefined;
@@ -556,6 +622,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   // Rollovers agent_before_settle did not take: an external compaction owner, a declined
   // template (Pi's LLM summary takes over), or another extension compacting at that boundary.
   pi.on("agent_settled", async (_event, ctx) => {
+    reconcileProposal(ctx);
     if (!pendingRollover || !scheduled(pendingRollover.reason)) return;
     // ESC means stop: rolling over would compact and then trigger a continuation turn the user
     // just interrupted. Only an explicit user request for a fresh window survives the abort.
@@ -572,7 +639,7 @@ export default function noteContext(pi: ExtensionAPI): void {
       onComplete: () => {
         inFlightRollover = null;
         pi.sendMessage(
-          { customType: "note-context/continue", content: "[note-context] New context window started. Continue with the notebook's Next action.", display: true },
+          { customType: "note-context/continue", content: SCHEDULED_CONTINUE, display: true },
           { deliverAs: "followUp", triggerTurn: true },
         );
       },
@@ -608,7 +675,13 @@ export default function noteContext(pi: ExtensionAPI): void {
         maintenance = { kind: "idle" };
         return undefined;
       }
-      const drafts = boundaryRollover(ctx, "fallback", "[note-context] New context window started after the maintenance checkpoint. Continue with the notebook's Next action.");
+      if (event.entries.some((e) => e.type === "compaction")) {
+        // Another extension compacts at this boundary; its compaction opens the new window.
+        appendLedger({ kind: "rollover_cancelled", session: sessionId(ctx), window, reason: "fallback", why: "other_compaction" });
+        maintenance = { kind: "idle" };
+        return undefined;
+      }
+      const drafts = boundaryRollover(ctx, "fallback", FALLBACK_CONTINUE);
       if (drafts) return { entries: [...event.entries, ...drafts], continue: true };
       // Declined (ledger row written): hand this window to Pi's threshold compaction.
       maintenance = { kind: "idle" };
