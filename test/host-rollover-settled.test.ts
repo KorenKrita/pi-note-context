@@ -367,6 +367,68 @@ describe("user-requested rollover", () => {
   });
 });
 
+describe("user abort (ESC) before settle", () => {
+  // Real session 01a0c846… 2026-09-22 09:35–09:38: notes armed a host schedule, the model kept
+  // working, the user pressed ESC; settle still compacted and the continuation restarted work.
+  test("cancels a pending host schedule: no compact, no continuation; ledger says user_abort; next run's notes re-arm", async () => {
+    const h = harness();
+    expect(await h.notes({ sections: { Task: "parser", Next: "x" } })).toContain("Rollover scheduled by the host");
+    h.abort();
+    // pi-error-auto may rewrite the aborted message into stopReason "error"; the signal is what counts.
+    await h.emit("turn_end", { message: { role: "assistant", stopReason: "error" } });
+    await h.emit("agent_end", { messages: [] });
+    await h.emit("agent_settled");
+    expect(h.compactCalls).toHaveLength(0);
+    expect(h.sent.some((m) => m.customType === "note-context/continue")).toBe(false);
+    const cancelled = (await h.ledgerRows()).find((r) => r["kind"] === "rollover_cancelled");
+    expect(cancelled?.["reason"]).toBe("host");
+    expect(cancelled?.["why"]).toBe("user_abort");
+    await h.startRun();
+    expect(await h.notes({ sections: { Next: "resume" } })).toContain("Rollover scheduled by the host");
+    await h.emit("agent_settled");
+    expect(h.compactCalls).toHaveLength(1);
+  });
+
+  test("abort seen only at agent_end (ESC during a tool) also cancels", async () => {
+    const h = harness();
+    await h.notes({ sections: { Task: "parser", Next: "x" } });
+    h.abort();
+    await h.emit("agent_end", { messages: [] });
+    await h.emit("agent_settled");
+    expect(h.compactCalls).toHaveLength(0);
+  });
+
+  test("cancels a model new_context schedule too", async () => {
+    const h = harness({ autoRollover: false });
+    await h.notes({ sections: { Task: "parser", Next: "x" } });
+    expect(await h.newContext()).toContain("rollover scheduled");
+    h.abort();
+    await h.turnEnd();
+    await h.emit("agent_settled");
+    expect(h.compactCalls).toHaveLength(0);
+    expect((await h.ledgerRows()).find((r) => r["kind"] === "rollover_cancelled")?.["why"]).toBe("user_abort");
+  });
+
+  test("a user-requested rollover survives the abort", async () => {
+    const h = harness({ autoRollover: false });
+    await h.notes({ sections: { Task: "parser", Next: "x" } });
+    await h.newContext({ userRequested: true });
+    h.abort();
+    await h.turnEnd();
+    await h.emit("agent_settled");
+    expect(h.compactCalls).toHaveLength(1);
+  });
+
+  test("an aborted turn in the fallback zone does not steer a maintenance request", async () => {
+    const h = harness({ autoRollover: false });
+    h.usage.tokens = 375_000;
+    h.abort();
+    await h.turnEnd();
+    expect(h.sent.some((m) => m.customType === "note-context/maintenance")).toBe(false);
+    expect(h.sent.some((m) => m.customType === "note-context/reminder")).toBe(false);
+  });
+});
+
 describe("split thresholds: reminder budget vs. fallback budget", () => {
   test("host auto-rollover is allowed only from the reminder threshold", async () => {
     const h = harness();

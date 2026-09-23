@@ -72,6 +72,8 @@ export default function noteContext(pi: ExtensionAPI): void {
   let branchChangedPending = false;
   let pendingRollover: { reason: RolloverReason; requestedAtLeaf: string | null } | null = null;
   let inFlightRollover: { reason: RolloverReason } | null = null;
+  /** The current run was aborted by the user (ESC). Seen on ctx.signal at turn_end/agent_end; cleared at agent_start. */
+  let runAborted = false;
   let maintenance: MaintenanceState = { kind: "idle" };
   let attemptCounter = 0;
   let reminderShownForWindow: number | null = null;
@@ -85,6 +87,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     branchChangedPending = false;
     pendingRollover = null;
     inFlightRollover = null;
+    runAborted = false;
     maintenance = { kind: "idle" };
     reminderShownForWindow = null;
     maintenanceExhaustedForWindow = null;
@@ -497,8 +500,22 @@ export default function noteContext(pi: ExtensionAPI): void {
     return true;
   }
 
+  pi.on("agent_start", async () => {
+    runAborted = false;
+  });
+  pi.on("agent_end", async (_event, ctx) => {
+    if (ctx.signal?.aborted) runAborted = true;
+  });
+
   pi.on("agent_settled", async (_event, ctx) => {
     if (!pendingRollover || (pendingRollover.reason !== "model" && pendingRollover.reason !== "user" && pendingRollover.reason !== "host")) return;
+    // ESC means stop: rolling over would compact and then trigger a continuation turn the user
+    // just interrupted. Only an explicit user request for a fresh window survives the abort.
+    if (runAborted && pendingRollover.reason !== "user") {
+      appendLedger({ kind: "rollover_cancelled", session: sessionId(ctx), window: currentWindow(branchOf(ctx)), reason: pendingRollover.reason, why: "user_abort" });
+      pendingRollover = null;
+      return;
+    }
     if (cancelHostScheduleIfStale(ctx)) return;
     const reason = pendingRollover.reason;
     pendingRollover = null;
@@ -532,6 +549,8 @@ export default function noteContext(pi: ExtensionAPI): void {
   }
 
   pi.on("turn_end", async (event, ctx) => {
+    if (ctx.signal?.aborted) runAborted = true;
+    if (runAborted) return; // no reminder or maintenance steer into a run the user stopped; settle decides the schedule
     if (event.message.role === "assistant") cancelHostScheduleIfStale(ctx);
     if (pendingRollover || inFlightRollover || maintenance.kind !== "idle") return;
     if (event.message.role !== "assistant") return;
