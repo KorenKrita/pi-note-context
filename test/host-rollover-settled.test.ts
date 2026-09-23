@@ -99,8 +99,24 @@ function harness(config: Record<string, unknown> = {}) {
     const r = await tools.get("new_context")!.execute("call", params, undefined, undefined, ctx);
     return r.content.map((c) => c.text).join("\n");
   };
+  /** Compaction entries our handlers proposed at actionable boundaries (turn_end, agent_before_settle). */
+  const boundary: { reason: string; drafts: { type: string; customType?: string; details?: { reason?: string } }[] }[] = [];
+  const collect = (reason: string, results: unknown[]) => {
+    for (const r of results) {
+      const drafts = (r as { entries?: { type: string }[] } | undefined)?.entries;
+      if (drafts?.some((d) => d.type === "compaction")) boundary.push({ reason, drafts });
+    }
+  };
   /** turn_end for an assistant message, as Pi emits it after every assistant response. */
-  const turnEnd = () => emit("turn_end", { message: { role: "assistant" } });
+  const turnEnd = async (message: Record<string, unknown> = { role: "assistant" }, outcome = "completed") =>
+    collect("turn_end", await emit("turn_end", { message, entries: [], continue: false, outcome }));
+  /** Pi's settle sequence: the actionable agent_before_settle boundary, then agent_settled. */
+  const settle = async (outcome = "completed") => {
+    collect("agent_before_settle", await emit("agent_before_settle", { entries: [], continue: false, outcome }));
+    await emit("agent_settled");
+  };
+  /** Rollovers started either way: boundary compaction drafts plus ctx.compact() calls. */
+  const compactions = () => boundary.length + compactCalls.length;
   const ledgerRows = async () => {
     await flushLedger();
     try {
@@ -116,7 +132,7 @@ function harness(config: Record<string, unknown> = {}) {
     run.controller = new AbortController();
     await emit("agent_start");
   };
-  return { branch, ctx, usage, state, emit, notes, newContext, turnEnd, sent, compactCalls, ledgerRows, abort, startRun };
+  return { branch, ctx, usage, state, emit, notes, newContext, turnEnd, settle, boundary, compactions, sent, compactCalls, ledgerRows, abort, startRun };
 }
 
 describe("host rollover: re-check at agent_settled", () => {
@@ -124,10 +140,10 @@ describe("host rollover: re-check at agent_settled", () => {
     const h = harness();
     const out = await h.notes({ sections: { Task: "parser", Next: "edit parseComment" } });
     expect(out).toContain("Rollover scheduled by the host");
-    await h.emit("agent_settled");
-    expect(h.compactCalls.length).toBe(1);
-    await h.emit("agent_settled");
-    expect(h.compactCalls.length).toBe(1);
+    await h.settle();
+    expect(h.compactions()).toBe(1);
+    await h.settle();
+    expect(h.compactions()).toBe(1);
   });
 
   test("pending that went stale before settle is cancelled, ctx.compact is not called, ledger says why; next notes re-arms", async () => {
@@ -137,8 +153,8 @@ describe("host rollover: re-check at agent_settled", () => {
     // The model kept working: ~60K tokens land after the review marker, so the actual cut
     // would now drop unreviewed material (the real session 01a08e78… on 2026-09-11 05:08).
     for (let i = 20; i <= 31; i++) h.branch.push(...round(i, 20));
-    await h.emit("agent_settled");
-    expect(h.compactCalls.length).toBe(0);
+    await h.settle();
+    expect(h.compactions()).toBe(0);
     const rows = await h.ledgerRows();
     const cancelled = rows.find((r) => r["kind"] === "rollover_cancelled");
     expect(cancelled).toBeDefined();
@@ -147,8 +163,8 @@ describe("host rollover: re-check at agent_settled", () => {
     // A fresh notes write re-arms the host rollover and it runs on the next settle.
     const again = await h.notes({ sections: { Next: "resume after re-check" } });
     expect(again).toContain("Rollover scheduled by the host");
-    await h.emit("agent_settled");
-    expect(h.compactCalls.length).toBe(1);
+    await h.settle();
+    expect(h.compactions()).toBe(1);
   });
 
   test("pressure that fell below the floor before settle (e.g. ObservationPack placeholders) cancels with the gate's blocker", async () => {
@@ -156,8 +172,8 @@ describe("host rollover: re-check at agent_settled", () => {
     const out = await h.notes({ sections: { Task: "parser", Next: "x" } });
     expect(out).toContain("Rollover scheduled by the host");
     h.usage.tokens = 120_000; // below the reminder threshold, which is the host floor
-    await h.emit("agent_settled");
-    expect(h.compactCalls.length).toBe(0);
+    await h.settle();
+    expect(h.compactions()).toBe(0);
     const cancelled = (await h.ledgerRows()).find((r) => r["kind"] === "rollover_cancelled");
     expect(cancelled?.["reason"]).toBe("host");
     expect(cancelled?.["why"]).toBe("low_pressure");
@@ -168,22 +184,24 @@ describe("host rollover: re-check at agent_settled", () => {
     const out = await h.notes({ sections: { Task: "parser", Next: "x" } });
     expect(out).toContain("Rollover scheduled by the host");
     h.state.model = { provider: "p", id: "remote", contextWindow: 1_000_000 };
-    await h.emit("agent_settled");
-    expect(h.compactCalls.length).toBe(0);
+    await h.settle();
+    expect(h.compactions()).toBe(0);
     const cancelled = (await h.ledgerRows()).find((r) => r["kind"] === "rollover_cancelled");
     expect(cancelled?.["why"]).toBe("external_owner");
   });
 
   test("ctx.compact error on a scheduled rollover is recorded as a category, never as the raw message", async () => {
-    const h = harness();
-    await h.notes({ sections: { Task: "parser", Next: "x" } });
-    await h.emit("agent_settled");
+    // ctx.compact() remains only for rollovers handed to Pi's compaction (here: an external owner).
+    const h = harness({ externalCompactionModels: ["p/m"], minReclaimTokens: 40_000 });
+    await h.notes({ reviewed: true });
+    await h.newContext({ userRequested: true });
+    await h.settle();
     expect(h.compactCalls.length).toBe(1);
     const secret = "sk-live-SECRET-9f8e7d6c";
     h.compactCalls[0]!.onError?.(new Error(`Compaction cancelled: upstream said ${secret} in the response body`));
     const rows = await h.ledgerRows();
     const failed = rows.find((r) => r["kind"] === "rollover_failed");
-    expect(failed?.["reason"]).toBe("host");
+    expect(failed?.["reason"]).toBe("user");
     expect(failed?.["why"]).toBe("cancelled");
     expect(JSON.stringify(rows)).not.toContain(secret);
     expect(JSON.stringify(rows)).not.toContain("response body");
@@ -207,13 +225,18 @@ describe("host schedule vs. pressure maintenance and model confirmation", () => 
     const [guard] = await h.emit("tool_call", { toolName: "read", input: {} });
     expect((guard as { block?: boolean } | undefined)?.block).toBe(true);
     // Settling does not compact a stale notebook.
-    await h.emit("agent_settled");
-    expect(h.compactCalls.length).toBe(0);
-    // The checkpoint lands → fallback compaction, exactly once.
+    await h.settle();
+    expect(h.compactions()).toBe(0);
+    // The checkpoint lands → fallback rollover at that turn's turn_end boundary, exactly once, no abort.
     await h.notes({ sections: { Next: "checkpoint under pressure" } });
-    expect(h.compactCalls.length).toBe(1);
-    await h.emit("agent_settled");
-    expect(h.compactCalls.length).toBe(1);
+    expect(h.compactions()).toBe(0);
+    await h.turnEnd();
+    expect(h.compactions()).toBe(1);
+    expect(h.compactCalls.length).toBe(0);
+    expect(h.boundary[0]).toMatchObject({ reason: "turn_end", drafts: [{ type: "compaction", details: { reason: "fallback" } }, { type: "custom_message", customType: "note-context/continue" }] });
+    await h.turnEnd();
+    await h.settle();
+    expect(h.compactions()).toBe(1);
   });
 
   test("host pending cancelled for low pressure does not start maintenance", async () => {
@@ -221,8 +244,8 @@ describe("host schedule vs. pressure maintenance and model confirmation", () => 
     await h.notes({ sections: { Task: "parser", Next: "x" } });
     h.usage.tokens = 120_000;
     await h.turnEnd();
-    await h.emit("agent_settled");
-    expect(h.compactCalls.length).toBe(0);
+    await h.settle();
+    expect(h.compactions()).toBe(0);
     expect(h.sent.some((m) => m.customType === "note-context/maintenance")).toBe(false);
     expect((await h.ledgerRows()).some((r) => r["kind"] === "rollover_cancelled" && r["why"] === "low_pressure")).toBe(true);
   });
@@ -233,10 +256,10 @@ describe("host schedule vs. pressure maintenance and model confirmation", () => 
     const out = await h.newContext();
     expect(out).toContain("rollover scheduled");
     h.usage.tokens = 120_000; // below the host floor — irrelevant to a model request
-    await h.emit("agent_settled");
-    expect(h.compactCalls.length).toBe(1);
-    await h.emit("agent_settled");
-    expect(h.compactCalls.length).toBe(1);
+    await h.settle();
+    expect(h.compactions()).toBe(1);
+    await h.settle();
+    expect(h.compactions()).toBe(1);
     expect((await h.ledgerRows()).some((r) => r["kind"] === "rollover_cancelled")).toBe(false);
   });
 
@@ -245,8 +268,8 @@ describe("host schedule vs. pressure maintenance and model confirmation", () => 
     await h.notes({ sections: { Task: "parser", Next: "x" } });
     for (let i = 20; i <= 31; i++) h.branch.push(...round(i, 20));
     await expect(h.newContext()).rejects.toThrow(/stale_notebook|notebook predates/);
-    await h.emit("agent_settled");
-    expect(h.compactCalls.length).toBe(0);
+    await h.settle();
+    expect(h.compactions()).toBe(0);
     expect((await h.ledgerRows()).some((r) => r["kind"] === "rollover_cancelled" && r["why"] === "stale_notebook")).toBe(true);
   });
 
@@ -261,9 +284,9 @@ describe("host schedule vs. pressure maintenance and model confirmation", () => 
     const h = harness({ externalCompactionModels: ["p/m"], minReclaimTokens: 40_000 });
     expect(await h.newContext()).toContain("external compaction owner");
     expect(await h.newContext({ userRequested: false })).toContain("external compaction owner");
-    await h.emit("agent_settled");
-    await h.emit("agent_settled");
-    expect(h.compactCalls).toHaveLength(1);
+    await h.settle();
+    await h.settle();
+    expect(h.compactions()).toBe(1);
     const gates = (await h.ledgerRows()).filter((r) => r["kind"] === "gate");
     expect(gates.map((r) => [r["reason"], r["ok"]])).toEqual([["model", true], ["model", true]]);
   });
@@ -277,13 +300,10 @@ describe("user-requested rollover", () => {
     await expect(h.newContext()).rejects.toThrow(/below the 40K threshold/);
     await expect(h.newContext({ userRequested: false })).rejects.toThrow(/below the 40K threshold/);
     expect(await h.newContext({ userRequested: true })).toContain("rollover scheduled");
-    await h.emit("agent_settled");
-    expect(h.compactCalls).toHaveLength(1);
-    const [result] = await h.emit("session_before_compact", {
-      reason: "manual",
-      preparation: { firstKeptEntryId: "a10", tokensBefore: 84_000 },
-    });
-    const { compaction } = result as { compaction: { details: { reason: string }; summary: string } };
+    await h.settle();
+    expect(h.compactions()).toBe(1);
+    expect(h.compactCalls.length).toBe(0);
+    const compaction = h.boundary[0]!.drafts[0] as unknown as { details: { reason: string }; summary: string };
     expect(compaction.details.reason).toBe("user");
     expect(compaction.summary).toContain("rollover reason: user");
     expect((await h.ledgerRows()).filter((r) => r["kind"] === "gate" && r["ok"] === true)).toContainEqual(
@@ -302,8 +322,8 @@ describe("user-requested rollover", () => {
     h.branch.splice(0, h.branch.length, ...original);
     for (let i = 20; i <= 31; i++) h.branch.push(...round(i, 20));
     await expect(h.newContext({ userRequested: true })).rejects.toThrow(/notebook predates/);
-    await h.emit("agent_settled");
-    expect(h.compactCalls).toHaveLength(0);
+    await h.settle();
+    expect(h.compactions()).toBe(0);
     const rows = (await h.ledgerRows()).filter((r) => r["kind"] === "gate");
     expect(rows.map((r) => [r["reason"], r["ok"], r["blocker"]])).toEqual([
       ["user", false, "no_notebook"],
@@ -318,15 +338,13 @@ describe("user-requested rollover", () => {
     expect(await h.newContext({ userRequested: true })).toContain("confirms the host schedule");
     await expect(h.newContext({ userRequested: true })).rejects.toThrow(/already scheduled/);
     await expect(h.newContext()).rejects.toThrow(/already scheduled/);
-    await h.emit("agent_settled");
-    await h.emit("agent_settled");
-    expect(h.compactCalls).toHaveLength(1);
-    await h.emit("session_before_compact", { reason: "manual", preparation: { firstKeptEntryId: "a10", tokensBefore: 84_000 } });
+    await h.settle();
+    await h.settle();
+    expect(h.compactions()).toBe(1);
     const rows = await h.ledgerRows();
     expect(rows.find((r) => r["kind"] === "rollover")?.["reason"]).toBe("user");
     expect(rows.some((r) => r["kind"] === "rollover_cancelled")).toBe(false);
-    h.compactCalls[0]!.onComplete?.();
-    expect(h.sent.some((m) => m.customType === "note-context/continue")).toBe(true);
+    expect(h.boundary[0]).toMatchObject({ reason: "agent_before_settle", drafts: [{ type: "compaction" }, { type: "custom_message", customType: "note-context/continue" }] });
   });
 
   test("user request does not bypass freshness against the actual compaction cut", async () => {
@@ -334,7 +352,7 @@ describe("user-requested rollover", () => {
     await h.notes({ reviewed: true });
     await h.newContext({ userRequested: true });
     for (let i = 20; i <= 31; i++) h.branch.push(...round(i, 20));
-    await h.emit("agent_settled");
+    await h.settle();
     const results = await h.emit("session_before_compact", { reason: "manual", preparation: { firstKeptEntryId: "a31", tokensBefore: 150_000 } });
     expect(results).toEqual([undefined]);
     expect((await h.ledgerRows()).find((r) => r["kind"] === "rollover_declined")?.["why"]).toBe("stale_notebook_at_cut");
@@ -346,8 +364,8 @@ describe("user-requested rollover", () => {
     expect(await h.newContext({ userRequested: true })).toContain("external compaction owner");
     await expect(h.newContext()).rejects.toThrow(/already scheduled/);
     await expect(h.newContext({ userRequested: true })).rejects.toThrow(/already scheduled/);
-    await h.emit("agent_settled");
-    expect(h.compactCalls).toHaveLength(1);
+    await h.settle();
+    expect(h.compactions()).toBe(1);
     expect(await h.emit("session_before_compact", { reason: "manual", preparation: { firstKeptEntryId: "a10", tokensBefore: 84_000 } })).toEqual([undefined]);
     expect((await h.ledgerRows()).find((r) => r["kind"] === "gate" && r["ok"] === true)?.["reason"]).toBe("user");
     expect((await h.ledgerRows()).some((r) => r["kind"] === "rollover")).toBe(false);
@@ -356,7 +374,6 @@ describe("user-requested rollover", () => {
   test.each([false, true])("user request still yields to customInstructions (external owner: %s)", async (external) => {
     const h = harness({ autoRollover: false, externalCompactionModels: external ? ["p/m"] : [] });
     await h.newContext({ userRequested: true });
-    await h.emit("agent_settled");
     const results = await h.emit("session_before_compact", {
       reason: "manual",
       customInstructions: "Focus on the parser API.",
@@ -375,18 +392,18 @@ describe("user abort (ESC) before settle", () => {
     expect(await h.notes({ sections: { Task: "parser", Next: "x" } })).toContain("Rollover scheduled by the host");
     h.abort();
     // pi-error-auto may rewrite the aborted message into stopReason "error"; the signal is what counts.
-    await h.emit("turn_end", { message: { role: "assistant", stopReason: "error" } });
+    await h.turnEnd({ role: "assistant", stopReason: "error" }, "error");
     await h.emit("agent_end", { messages: [] });
-    await h.emit("agent_settled");
-    expect(h.compactCalls).toHaveLength(0);
+    await h.settle();
+    expect(h.compactions()).toBe(0);
     expect(h.sent.some((m) => m.customType === "note-context/continue")).toBe(false);
     const cancelled = (await h.ledgerRows()).find((r) => r["kind"] === "rollover_cancelled");
     expect(cancelled?.["reason"]).toBe("host");
     expect(cancelled?.["why"]).toBe("user_abort");
     await h.startRun();
     expect(await h.notes({ sections: { Next: "resume" } })).toContain("Rollover scheduled by the host");
-    await h.emit("agent_settled");
-    expect(h.compactCalls).toHaveLength(1);
+    await h.settle();
+    expect(h.compactions()).toBe(1);
   });
 
   test("abort seen only at agent_end (ESC during a tool) also cancels", async () => {
@@ -394,8 +411,8 @@ describe("user abort (ESC) before settle", () => {
     await h.notes({ sections: { Task: "parser", Next: "x" } });
     h.abort();
     await h.emit("agent_end", { messages: [] });
-    await h.emit("agent_settled");
-    expect(h.compactCalls).toHaveLength(0);
+    await h.settle();
+    expect(h.compactions()).toBe(0);
   });
 
   test("cancels a model new_context schedule too", async () => {
@@ -404,8 +421,8 @@ describe("user abort (ESC) before settle", () => {
     expect(await h.newContext()).toContain("rollover scheduled");
     h.abort();
     await h.turnEnd();
-    await h.emit("agent_settled");
-    expect(h.compactCalls).toHaveLength(0);
+    await h.settle();
+    expect(h.compactions()).toBe(0);
     expect((await h.ledgerRows()).find((r) => r["kind"] === "rollover_cancelled")?.["why"]).toBe("user_abort");
   });
 
@@ -415,8 +432,8 @@ describe("user abort (ESC) before settle", () => {
     await h.newContext({ userRequested: true });
     h.abort();
     await h.turnEnd();
-    await h.emit("agent_settled");
-    expect(h.compactCalls).toHaveLength(1);
+    await h.settle();
+    expect(h.compactions()).toBe(1);
   });
 
   test("an aborted turn in the fallback zone does not steer a maintenance request", async () => {
