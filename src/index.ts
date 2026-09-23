@@ -23,7 +23,7 @@ import {
 } from "./guidance.ts";
 import { currentWindow, indexBranch, isRolloverDetails, list, read, renderList, renderRead, renderSearch, search } from "./history.ts";
 import { appendLedger, flushLedger } from "./ledger.ts";
-import { maintenanceRequestText, reminderText, step, zoneFor, type MaintenanceState, type Thresholds } from "./maintenance.ts";
+import { fallbackThreshold, maintenanceRequestText, reminderText, reminderThreshold, step, zoneFor, type MaintenanceState, type Thresholds } from "./maintenance.ts";
 import { applySections, makeRecord, NOTEBOOK_ENTRY_TYPE, reconstructNotebook, renderNotebook, type Notebook } from "./notebook.ts";
 import { estimateTokens as estimateText } from "./notebook.ts";
 import { droppedRange, makeDetails, pinUserMessages, renderRolloverSummary, type RolloverReason } from "./rollover.ts";
@@ -138,15 +138,18 @@ export default function noteContext(pi: ExtensionAPI): void {
     }
   }
 
+  const physicalWindow = (ctx: ExtensionContext) => ctx.getContextUsage()?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+  const capped = (physical: number, budget: number) => (physical > 0 ? Math.min(physical, budget) : 0);
+
   /** The scale pressure is read against: the physical window capped at budgetTokens. */
   function budgetWindow(ctx: ExtensionContext): number {
-    const physical = ctx.getContextUsage()?.contextWindow ?? ctx.model?.contextWindow ?? 0;
-    return physical > 0 ? Math.min(physical, config.budgetTokens) : 0;
+    return capped(physicalWindow(ctx), config.budgetTokens);
   }
 
   function thresholds(ctx: ExtensionContext): Thresholds {
     return {
       contextWindow: budgetWindow(ctx),
+      fallbackWindow: capped(physicalWindow(ctx), config.fallbackBudgetTokens),
       reserveTokens: compactionSettings(ctx).reserveTokens,
       leadTokens: config.leadTokens,
       fallbackBufferTokens: config.fallbackBufferTokens,
@@ -331,7 +334,7 @@ export default function noteContext(pi: ExtensionAPI): void {
       minReclaimTokens: config.minReclaimTokens,
       pending: false,
       summaryTokens: summaryTokenEstimate(ctx, notebook),
-      pressure: usage?.tokens != null ? { tokens: usage.tokens, budgetTokens: budgetWindow(ctx), floorPercent: config.autoRolloverFloorPercent } : undefined,
+      pressure: usage?.tokens != null ? { tokens: usage.tokens, floorTokens: reminderThreshold(thresholds(ctx)) } : undefined,
     });
   }
 
@@ -551,7 +554,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     }
     if (reminderShownForWindow === window) return;
     reminderShownForWindow = window;
-    const toThreshold = t.contextWindow - t.reserveTokens - (usage?.tokens ?? 0);
+    const toThreshold = fallbackThreshold(t) - (usage?.tokens ?? 0);
     appendLedger({ kind: "reminder", session: sessionId(ctx), window, zone });
     pi.sendMessage(
       { customType: "note-context/reminder", content: reminderText(toThreshold, notebook.revision > 0 ? renderNotebook(notebook.sections) : null), display: true },

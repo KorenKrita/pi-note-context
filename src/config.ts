@@ -21,10 +21,10 @@ export interface Config {
   entryIdTrailers: boolean;
   /** Host schedules a rollover after a notes write when the gate passes (no new_context call needed). */
   autoRollover: boolean;
-  /** Host-initiated rollover only fires at or above this share of the budget; below it the model must call new_context itself. */
-  autoRolloverFloorPercent: number;
-  /** Pressure is measured against min(contextWindow, budgetTokens): large windows degrade before they fill. */
+  /** Reminder zone and host auto-rollover floor are measured against min(contextWindow, budgetTokens): large windows degrade before they fill. */
   budgetTokens: number;
+  /** Forced fallback is measured against min(contextWindow, fallbackBudgetTokens); defaults to budgetTokens. */
+  fallbackBudgetTokens: number;
   /** Status-line step: a reading is delivered when pressure or tokens-since-review cross a multiple of this. */
   statusStepTokens: number;
 }
@@ -40,8 +40,8 @@ export const DEFAULT_CONFIG: Config = {
   historyReadMaxChars: 12_000,
   entryIdTrailers: true,
   autoRollover: true,
-  autoRolloverFloorPercent: 50,
   budgetTokens: 400_000,
+  fallbackBudgetTokens: 400_000,
   statusStepTokens: 40_000,
 };
 
@@ -57,6 +57,7 @@ function num(v: unknown, d: number, min = 0): number {
 export function parseConfig(raw: unknown): Config {
   if (!raw || typeof raw !== "object") return DEFAULT_CONFIG;
   const r = raw as Record<string, unknown>;
+  const budgetTokens = num(r["budgetTokens"], DEFAULT_CONFIG.budgetTokens, 32_000);
   return {
     enabled: typeof r["enabled"] === "boolean" ? r["enabled"] : DEFAULT_CONFIG.enabled,
     limits: {
@@ -74,8 +75,8 @@ export function parseConfig(raw: unknown): Config {
     historyReadMaxChars: num(r["historyReadMaxChars"], DEFAULT_CONFIG.historyReadMaxChars, 500),
     entryIdTrailers: typeof r["entryIdTrailers"] === "boolean" ? r["entryIdTrailers"] : DEFAULT_CONFIG.entryIdTrailers,
     autoRollover: typeof r["autoRollover"] === "boolean" ? r["autoRollover"] : DEFAULT_CONFIG.autoRollover,
-    autoRolloverFloorPercent: Math.min(100, num(r["autoRolloverFloorPercent"], DEFAULT_CONFIG.autoRolloverFloorPercent, 0)),
-    budgetTokens: num(r["budgetTokens"], DEFAULT_CONFIG.budgetTokens, 32_000),
+    budgetTokens,
+    fallbackBudgetTokens: num(r["fallbackBudgetTokens"], budgetTokens, 32_000),
     statusStepTokens: num(r["statusStepTokens"], DEFAULT_CONFIG.statusStepTokens, 1_000),
   };
 }

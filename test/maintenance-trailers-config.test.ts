@@ -8,12 +8,20 @@ import { assistant, notebookEntry, toolResult, user } from "./fixtures.ts";
 import { EMPTY_NOTEBOOK } from "../src/notebook.ts";
 
 describe("maintenance state machine", () => {
-  const T = { contextWindow: 200_000, reserveTokens: 16_384, leadTokens: 24_000, fallbackBufferTokens: 12_000 };
+  const T = { contextWindow: 200_000, fallbackWindow: 200_000, reserveTokens: 16_384, leadTokens: 24_000, fallbackBufferTokens: 12_000 };
   test("zones: normal → reminder → fallback; null tokens is normal", () => {
     expect(zoneFor(null, T)).toBe("normal");
     expect(zoneFor(100_000, T)).toBe("normal");
     expect(zoneFor(200_000 - 16_384 - 24_000 + 1, T)).toBe("reminder");
     expect(zoneFor(200_000 - 16_384 - 12_000 + 1, T)).toBe("fallback");
+  });
+  test("zones: a larger fallback window keeps the reminder where it was and moves only the fallback", () => {
+    const split = { ...T, contextWindow: 400_000, fallbackWindow: 800_000 };
+    expect(zoneFor(400_000 - 16_384 - 24_000 - 1, split)).toBe("normal");
+    expect(zoneFor(400_000 - 16_384 - 24_000, split)).toBe("reminder");
+    expect(zoneFor(400_000, split)).toBe("reminder");
+    expect(zoneFor(800_000 - 16_384 - 12_000 - 1, split)).toBe("reminder");
+    expect(zoneFor(800_000 - 16_384 - 12_000, split)).toBe("fallback");
   });
 
   test("enter → notes_ok with newer revision → compact_now; same revision does nothing", () => {
@@ -151,8 +159,9 @@ describe("config", () => {
     expect(c.externalCompactionModels).toEqual(["a/b"]);
     expect(c.entryIdTrailers).toBe(false);
     expect(parseConfig(null)).toBe(DEFAULT_CONFIG);
-    expect(parseConfig({ autoRolloverFloorPercent: 30 }).autoRolloverFloorPercent).toBe(30);
-    expect(parseConfig({ autoRolloverFloorPercent: 150 }).autoRolloverFloorPercent).toBe(100);
-    expect(parseConfig({ autoRolloverFloorPercent: -1 }).autoRolloverFloorPercent).toBe(50);
+    // fallbackBudgetTokens follows budgetTokens unless set; both share the 32K minimum.
+    expect(parseConfig({ budgetTokens: 300_000 }).fallbackBudgetTokens).toBe(300_000);
+    expect(parseConfig({ budgetTokens: 400_000, fallbackBudgetTokens: 800_000 }).fallbackBudgetTokens).toBe(800_000);
+    expect(parseConfig({ budgetTokens: 400_000, fallbackBudgetTokens: 1_000 }).fallbackBudgetTokens).toBe(400_000);
   });
 });

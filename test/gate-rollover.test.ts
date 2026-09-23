@@ -58,10 +58,11 @@ describe("gate", () => {
     const branch = longWindow({ reviewedAfterDrop: true });
     const nb = reconstructNotebook(branch);
     const base = { branch, notebook: nb, settings: { keepRecentTokens: KEEP }, minReclaimTokens: 20_000, pending: false, summaryTokens: 500 };
-    const low = evaluateGate({ ...base, pressure: { tokens: 84_000, budgetTokens: 400_000, floorPercent: 50 } });
+    const low = evaluateGate({ ...base, pressure: { tokens: 84_000, floorTokens: 359_616 } });
     expect(!low.ok && low.blocker).toBe("low_pressure");
-    expect(!low.ok && low.message).toContain("21%");
-    const high = evaluateGate({ ...base, pressure: { tokens: 200_000, budgetTokens: 400_000, floorPercent: 50 } });
+    expect(!low.ok && low.message).toContain("window at 84K");
+    expect(!low.ok && low.message).toContain("360K reminder threshold");
+    const high = evaluateGate({ ...base, pressure: { tokens: 359_616, floorTokens: 359_616 } });
     expect(high.ok).toBe(true);
     expect(evaluateGate(base).ok).toBe(true);
   });
@@ -71,7 +72,7 @@ describe("gate", () => {
     const base = { branch, notebook: reconstructNotebook(branch), settings: { keepRecentTokens: KEEP }, minReclaimTokens: 100_000, pending: false, summaryTokens: 500 };
     const model = evaluateGate(base);
     expect(!model.ok && model.blocker).toBe("low_reclaim");
-    const pressure = { tokens: 84_000, budgetTokens: 400_000, floorPercent: 50 };
+    const pressure = { tokens: 84_000, floorTokens: 359_616 };
     const host = evaluateGate({ ...base, pressure });
     expect(!host.ok && host.blocker).toBe("low_pressure");
     const verdict = evaluateGate({ ...base, pressure, reason: "user" });
@@ -92,7 +93,7 @@ describe("gate", () => {
       [fresh, true, "already_pending"],
       [tiny, false, "nothing_to_drop"],
     ] as const) {
-      const verdict = evaluateGate({ branch, notebook: reconstructNotebook(branch), settings: { keepRecentTokens: KEEP }, minReclaimTokens: 100_000, summaryTokens: 500, pending, reason: "user", pressure: { tokens: 1, budgetTokens: 400_000, floorPercent: 50 } });
+      const verdict = evaluateGate({ branch, notebook: reconstructNotebook(branch), settings: { keepRecentTokens: KEEP }, minReclaimTokens: 100_000, summaryTokens: 500, pending, reason: "user", pressure: { tokens: 1, floorTokens: 359_616 } });
       expect(!verdict.ok && verdict.blocker).toBe(blocker);
       expect(verdict.reason).toBe("user");
     }

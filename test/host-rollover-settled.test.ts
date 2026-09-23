@@ -63,13 +63,18 @@ function harness(config: Record<string, unknown> = {}) {
   } as unknown as ExtensionAPI;
   noteContext(pi);
 
-  const usage = { tokens: 250_000, contextWindow: 1_000_000 }; // 62% of the 400K budget: above the host floor
+  const usage = { tokens: 365_000, contextWindow: 1_000_000 }; // reminder zone of the 400K budget (≥ 400K − 16384 − 24000): host rollover allowed
   const state = { model: { provider: "p", id: "m", contextWindow: 1_000_000 } };
+  // The current run's abort signal, as Pi exposes it on ctx.signal while a run is active.
+  const run = { controller: new AbortController() };
   const ctx = {
     cwd: agentDir,
     hasUI: false,
     get model() {
       return state.model;
+    },
+    get signal() {
+      return run.controller.signal;
     },
     sessionManager: { getBranch: () => branch, buildContextEntries: () => branch, getSessionId: () => "s1", getLeafId: () => branch[branch.length - 1]?.id ?? null },
     getContextUsage: () => usage,
@@ -104,7 +109,14 @@ function harness(config: Record<string, unknown> = {}) {
       return [];
     }
   };
-  return { branch, ctx, usage, state, emit, notes, newContext, turnEnd, sent, compactCalls, ledgerRows };
+  /** The user presses ESC: Pi aborts the current run's signal. */
+  const abort = () => run.controller.abort();
+  /** A new run starts (next prompt or a triggered follow-up) with a fresh signal. */
+  const startRun = async () => {
+    run.controller = new AbortController();
+    await emit("agent_start");
+  };
+  return { branch, ctx, usage, state, emit, notes, newContext, turnEnd, sent, compactCalls, ledgerRows, abort, startRun };
 }
 
 describe("host rollover: re-check at agent_settled", () => {
@@ -143,7 +155,7 @@ describe("host rollover: re-check at agent_settled", () => {
     const h = harness();
     const out = await h.notes({ sections: { Task: "parser", Next: "x" } });
     expect(out).toContain("Rollover scheduled by the host");
-    h.usage.tokens = 120_000; // 30% of the 400K budget: below the 50% host floor
+    h.usage.tokens = 120_000; // below the reminder threshold, which is the host floor
     await h.emit("agent_settled");
     expect(h.compactCalls.length).toBe(0);
     const cancelled = (await h.ledgerRows()).find((r) => r["kind"] === "rollover_cancelled");
@@ -352,5 +364,28 @@ describe("user-requested rollover", () => {
     });
     expect(results).toEqual([undefined]);
     expect((await h.ledgerRows()).some((r) => r["kind"] === "rollover")).toBe(false);
+  });
+});
+
+describe("split thresholds: reminder budget vs. fallback budget", () => {
+  test("host auto-rollover is allowed only from the reminder threshold", async () => {
+    const h = harness();
+    h.usage.tokens = 300_000; // 75% of 400K, below the reminder threshold (~359.6K)
+    expect(await h.notes({ sections: { Task: "parser", Next: "x" } })).not.toContain("Rollover scheduled by the host");
+    expect((await h.ledgerRows()).find((r) => r["kind"] === "gate" && r["auto"] === true)?.["blocker"]).toBe("low_pressure");
+    h.usage.tokens = 365_000;
+    expect(await h.notes({ sections: { Next: "y" } })).toContain("Rollover scheduled by the host");
+  });
+
+  test("fallbackBudgetTokens moves only the forced fallback; the reminder stays on budgetTokens", async () => {
+    const h = harness({ autoRollover: false, budgetTokens: 400_000, fallbackBudgetTokens: 800_000 });
+    h.usage.tokens = 375_000; // past the 400K fallback line, but fallback now sits at 800K − 16384 − 12000
+    await h.turnEnd();
+    expect(h.sent.some((m) => m.customType === "note-context/maintenance")).toBe(false);
+    const reminder = h.sent.find((m) => m.customType === "note-context/reminder") as { content?: string } | undefined;
+    expect(reminder?.content).toContain("~397K tokens before forced rollover"); // 800K − 16384 − 12000 − 375K
+    h.usage.tokens = 780_000;
+    await h.turnEnd();
+    expect(h.sent.some((m) => m.customType === "note-context/maintenance")).toBe(true);
   });
 });

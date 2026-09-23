@@ -9,28 +9,36 @@ export type MaintenanceState =
   | { kind: "checkpointed"; attempt: number };
 
 export interface Thresholds {
+  /** Reminder scale: min(physical window, budgetTokens). */
   contextWindow: number;
+  /** Forced-fallback scale: min(physical window, fallbackBudgetTokens). */
+  fallbackWindow: number;
   reserveTokens: number;
   leadTokens: number;
   fallbackBufferTokens: number;
 }
 
-export function piThreshold(t: Thresholds): number {
-  return t.contextWindow - t.reserveTokens;
+/** Start of the reminder zone; also the host auto-rollover floor. */
+export function reminderThreshold(t: Thresholds): number {
+  return t.contextWindow - t.reserveTokens - t.leadTokens;
+}
+
+/** Start of the forced maintenance/fallback zone. */
+export function fallbackThreshold(t: Thresholds): number {
+  return t.fallbackWindow - t.reserveTokens - t.fallbackBufferTokens;
 }
 
 export type PressureZone = "normal" | "reminder" | "fallback";
 
 export function zoneFor(tokens: number | null, t: Thresholds): PressureZone {
   if (tokens === null || t.contextWindow <= 0) return "normal";
-  const th = piThreshold(t);
-  if (tokens >= th - t.fallbackBufferTokens) return "fallback";
-  if (tokens >= th - t.leadTokens) return "reminder";
+  if (tokens >= fallbackThreshold(t)) return "fallback";
+  if (tokens >= reminderThreshold(t)) return "reminder";
   return "normal";
 }
 
 export function reminderText(tokensToThreshold: number, notebookText: string | null): string {
-  const head = `[note-context] ~${Math.max(1, Math.round(tokensToThreshold / 1000))}K tokens before automatic rollover. Update notes against what will leave the window${notebookText ? " (current notebook below)" : ""}, or call notes({reviewed:true}) if they are already sufficient. Then call new_context.`;
+  const head = `[note-context] ~${Math.max(1, Math.round(tokensToThreshold / 1000))}K tokens before forced rollover. Update notes against what will leave the window${notebookText ? " (current notebook below)" : ""}, or call notes({reviewed:true}) if they are already sufficient. Then call new_context.`;
   return notebookText ? `${head}\n\n${notebookText}` : head;
 }
 

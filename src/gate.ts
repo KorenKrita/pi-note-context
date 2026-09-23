@@ -26,10 +26,11 @@ export interface GateInput {
    * does not roll over on its own, however large the reclaim. A rollover rebuilds the
    * provider prefix cache (25× read price on some providers) and is only worth it when the
    * window is substantially used; at task end with a mostly empty window it is pure cost.
+   * The floor is the reminder threshold: the host acts only once the model has been told to checkpoint.
    * Omit for the model-initiated path: the model calling new_context is the judgment.
    * Explicit user requests ignore this input even if supplied.
    */
-  pressure?: { tokens: number; budgetTokens: number; floorPercent: number };
+  pressure?: { tokens: number; floorTokens: number };
 }
 
 export type GateVerdict = { reason: GateReason } & (
@@ -67,11 +68,9 @@ export function evaluateGate(input: GateInput): GateVerdict {
   const reason = input.reason ?? (input.pressure ? "host" : "model");
   if (input.pending) return { ok: false, reason, blocker: "already_pending", message: "rollover already scheduled for the end of this turn." };
   if (input.notebook.revision === 0) return { ok: false, reason, blocker: "no_notebook", message: "no notebook on this branch — write notes first." };
-  if (reason !== "user" && input.pressure && input.pressure.budgetTokens > 0) {
-    const percent = Math.round((input.pressure.tokens / input.pressure.budgetTokens) * 100);
-    if (percent < input.pressure.floorPercent) {
-      return { ok: false, reason, blocker: "low_pressure", message: `window at ${percent}% of budget; the host rolls over on its own from ${input.pressure.floorPercent}% — call new_context yourself if a fresh window is worth it now.` };
-    }
+  if (reason !== "user" && input.pressure && input.pressure.tokens < input.pressure.floorTokens) {
+    const k = (n: number) => Math.round(n / 1000);
+    return { ok: false, reason, blocker: "low_pressure", message: `window at ${k(input.pressure.tokens)}K; the host rolls over on its own from the ${k(input.pressure.floorTokens)}K reminder threshold — call new_context yourself if a fresh window is worth it now.` };
   }
 
   const { firstKeptEntryId, firstKeptIndex, start } = projectCut(input.branch, input.settings.keepRecentTokens);
