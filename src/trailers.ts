@@ -1,8 +1,12 @@
 /**
- * Entry-id trailers (DESIGN.md §4.3): append `[history entry=<id>]` to
+ * Entry-id trailers (DESIGN.md §4.3): append `[note-context: this-message-id=<id>]` to
  * model-visible user/toolResult messages that already have a persisted
  * journal id. Messages are matched to journal entries by (role, timestamp,
  * toolCallId) — the fields Pi preserves verbatim from journal to context.
+ *
+ * The marker names the message it is attached to; its wording must not read as
+ * a user-authored citation of some other entry (models otherwise "follow" it
+ * with a history call). Pointers to other entries keep `[history entry=<id>]`.
  *
  * Assistant messages are left untouched (signed reasoning blocks must not be
  * rewritten). Structured non-text blocks are preserved; the trailer is a
@@ -12,10 +16,10 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
-export const TRAILER_RE = /^\[history entry=([A-Za-z0-9_-]+)\]$/;
+export const TRAILER_RE = /^\[note-context: this-message-id=([A-Za-z0-9_-]+)\]$/;
 
 export function trailerFor(id: string): string {
-  return `[history entry=${id}]`;
+  return `[note-context: this-message-id=${id}]`;
 }
 
 interface Key {
@@ -39,7 +43,8 @@ export function buildIdIndex(branch: readonly SessionEntry[]): Map<string, strin
   return idx;
 }
 
-const TRAILER_TAIL_RE = /\n\[history entry=([A-Za-z0-9_-]+)\]$/;
+// `^` covers a trailer that is its own text block (messages without text content).
+const TRAILER_TAIL_RE = /(?:^|\n)\[note-context: this-message-id=([A-Za-z0-9_-]+)\]$/;
 
 function lastTextIndex(content: readonly { type: string; text?: string }[]): number {
   for (let i = content.length - 1; i >= 0; i--) if (content[i]!.type === "text") return i;

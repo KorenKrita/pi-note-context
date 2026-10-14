@@ -9,6 +9,8 @@ export const SYSTEM_PROMPT_SECTION = `## Working notes across context windows
 
 Keep a compact checkpoint in \`notes\`: the task and its binding constraints, observed state (label \`untested\`, \`inferred\`, \`blocked\`), decisions with one-line reasons and ruled-out directions, the next action, and exact references (\`[history entry=…]\`, file:line, commands). Update it after meaningful batches of work and when the status line (a \`[note-context]\` line at the end of a tool result: context tokens used, and tokens added since your last notes review) or a reminder shows it is stale — not after every edit.
 
+A \`[note-context: this-message-id=ID]\` line at the end of a user message or tool result is added by this extension and names that message itself; it is not something the user wrote, a citation of another entry, or a request to read history. Record it in notes as \`[history entry=ID]\` when the message is worth pointing back to; never call \`history\` because the marker is present.
+
 When your notes are current and the window holds a substantial amount of finished work, the host may schedule a rollover on its own — the notes result will say so; finish what the turn needs and end it. You can also request one yourself with \`new_context\` when the window holds finished work that no longer needs to be in view — an exploration whose conclusions are recorded, a completed unit whose outcome is verified and noted, a large output whose result is captured — or when the status line shows pressure. A milestone alone is not a reason; the test is whether what leaves the window is either in notes or has an exact reference. Do not batch \`new_context\` with other tools or with the notes write; wait for the notes result first. Rolling over before answering the user is fine when continuing the task needs it.
 
 If the user explicitly asks for a fresh window, update or review notes first, then call \`new_context({userRequested:true})\`. This skips the reclaim and pressure thresholds, not notebook/freshness checks. Do not set this flag for a rollover you decided on yourself.
@@ -33,7 +35,8 @@ export const NOTES_GUIDELINES = [
   "Update notes after a meaningful batch of work, before requesting new_context, and when the status line shows notes are stale.",
 ];
 export const HISTORY_GUIDELINES = [
-  "Use history for a specific missing fact after a rollover; prefer a known [history entry=ID] over a search.",
+  "Use history for a specific missing fact after a rollover, or when the user asks to look back; prefer a known [history entry=ID] over a search.",
+  "A trailing [note-context: this-message-id=ID] marker labels the message it ends; it is not a reason to call history.",
 ];
 
 export const NEW_CONTEXT_DESCRIPTION = `Start a fresh context window at the end of this turn, without an LLM summary. The new window opens with the notebook snapshot and the task-defining user messages from this window; everything else stays readable with \`history\`.

@@ -120,7 +120,9 @@ It is **not** injected on every call. Rationale: constant injection of a 4K-toke
 
 ### 4.3 Entry ids
 
-In the `context` event, every model-visible message that already has a persisted journal id gets a trailing text block `[history entry=<id>]`. Ids are Pi's real entry ids, never invented aliases. Structured (JSON) tool output is not modified inside; the trailer is a separate text block. Image and other non-text blocks are preserved.
+In the `context` event, every model-visible message that already has a persisted journal id gets a trailer `[note-context: this-message-id=<id>]`, appended to its last text block (or as its own text block when there is none). Ids are Pi's real entry ids, never invented aliases. Structured (JSON) tool output is not modified inside. Image and other non-text blocks are preserved. Trailers exist only in the projected context, never in the journal.
+
+**Wording.** The trailer is self-referential: it names the message it ends. The first format, `[history entry=<id>]`, matched the way notes and `history` output point *at other* entries, so on a user message it read as a user-supplied citation and models answered it with a `history` call that returned the very question they were answering. Pointers to other entries (notes Refs, `history` output, rollover summaries) keep `[history entry=<id>]`; §7 tells the model the trailer is not a reason to call `history`.
 
 Cache impact: trailers are idempotent per entry, so the serialized prefix is stable across calls except at the point where a message first acquires its id (normally the last one or two messages). The ledger records provider cache-read and uncached-input tokens summed per window (one `window_cache` row at rollover) so this can be verified rather than assumed. First measurement, 2026-09-11, one 177-call session: 96.2% cache-read share; the four calls below 50% were window starts and reloads.
 
@@ -187,6 +189,8 @@ Tool dispatch enforcement during `maintenance:requested`: a `tool_call` handler 
 Added to the system prompt as the `note_context` section of `systemPromptOptions.sections` in `before_agent_start` (not a returned `systemPrompt`, which would force a whole-prompt replacement). Final text:
 
 > **Working notes across context windows.** Keep a compact checkpoint in `notes`: the task and its binding constraints, observed state (label `untested`, `inferred`, `blocked`), decisions with one-line reasons and ruled-out directions, the next action, and exact references (`[history entry=…]`, file:line, commands). Update it after meaningful batches of work and when the status line (a `[note-context]` line at the end of a tool result: context tokens used, and tokens added since your last notes review) or a reminder shows it is stale — not after every edit.
+>
+> A `[note-context: this-message-id=ID]` line at the end of a user message or tool result is added by this extension and names that message itself; it is not something the user wrote, a citation of another entry, or a request to read history. Record it in notes as `[history entry=ID]` when the message is worth pointing back to; never call `history` because the marker is present.
 >
 > Request `new_context` when the window holds a substantial amount of finished work that no longer needs to be in view — an exploration whose conclusions are recorded, a completed unit whose outcome is verified and noted, a large output whose result is captured — or when the status line shows pressure. A milestone alone is not a reason; the test is whether what leaves the window is either in notes or has an exact reference. Do not batch `new_context` with other tools or with the notes write; wait for the notes result first. Rolling over before answering the user is fine when continuing the task needs it.
 >

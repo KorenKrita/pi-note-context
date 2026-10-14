@@ -63,7 +63,7 @@ describe("maintenance state machine", () => {
 });
 
 describe("trailers", () => {
-  test("appends [history entry=id] to the last text block of user and toolResult only, idempotently, preserving untouched references", () => {
+  test("appends a self-identifying [note-context: this-message-id=id] to the last text block of user and toolResult only, idempotently, preserving untouched references", () => {
     const branch = [user("u1", "hello"), assistant("a1", "ok", [{ id: "c1", name: "read", args: {} }]), toolResult("t1", "c1", "read", "data")];
     const idx = buildIdIndex(branch);
     const msgs: AgentMessage[] = branch.map((e) => (e as { message: AgentMessage }).message);
@@ -74,9 +74,9 @@ describe("trailers", () => {
     expect(a).toBe(msgs[1]!); // same reference
     // block count unchanged (ObservationPack's "every block is text" classification still holds)
     expect(u.role === "user" && Array.isArray(u.content) && u.content.length).toBe(1);
-    expect(u.role === "user" && Array.isArray(u.content) && (u.content[0] as { text: string }).text).toBe("hello\n[history entry=u1]");
+    expect(u.role === "user" && Array.isArray(u.content) && (u.content[0] as { text: string }).text).toBe("hello\n[note-context: this-message-id=u1]");
     expect(t.role === "toolResult" && t.content.length).toBe(1);
-    expect(t.role === "toolResult" && (t.content[0] as { text: string }).text).toBe("data\n[history entry=t1]");
+    expect(t.role === "toolResult" && (t.content[0] as { text: string }).text).toBe("data\n[note-context: this-message-id=t1]");
     const again = addTrailers(out, idx);
     expect(again[0]).toBe(out[0]!);
     expect(again[2]).toBe(out[2]!);
@@ -90,7 +90,7 @@ describe("trailers", () => {
     // simulate ObservationPack replacing content with a placeholder
     const placeholder = { ...tagged, content: [{ type: "text" as const, text: "[large tool result replaced] id: obs_1" }] } as AgentMessage;
     const retagged = addTrailers([placeholder], idx)[0]!;
-    expect(retagged.role === "toolResult" && (retagged.content[0] as { text: string }).text).toBe("[large tool result replaced] id: obs_1\n[history entry=t1]");
+    expect(retagged.role === "toolResult" && (retagged.content[0] as { text: string }).text).toBe("[large tool result replaced] id: obs_1\n[note-context: this-message-id=t1]");
   });
 
   test("messages not yet persisted get no trailer", () => {
@@ -98,6 +98,21 @@ describe("trailers", () => {
     const fresh: AgentMessage = { role: "user", content: [{ type: "text", text: "new" }], timestamp: 42 };
     const out = addTrailers([fresh], buildIdIndex(branch));
     expect(out[0]).toBe(fresh);
+  });
+
+  test("a message with no text block gets a standalone trailer block, idempotently; string content is converted once", () => {
+    const img = { ...(user("u1", "x") as { message: AgentMessage }).message, content: [{ type: "image" as const, data: "AAAA", mimeType: "image/png" }] } as AgentMessage;
+    const str = { ...(user("u2", "x") as { message: AgentMessage }).message, content: "plain" } as AgentMessage;
+    const idx = buildIdIndex([{ id: "u1", parentId: null, timestamp: "", type: "message", message: img }, { id: "u2", parentId: null, timestamp: "", type: "message", message: str }] as never);
+    const out = addTrailers([img, str], idx);
+    const i = out[0]!;
+    expect(i.role === "user" && Array.isArray(i.content) && i.content.map((b) => b.type)).toEqual(["image", "text"]);
+    expect(i.role === "user" && Array.isArray(i.content) && (i.content[1] as { text: string }).text).toBe("[note-context: this-message-id=u1]");
+    const s = out[1]!;
+    expect(s.role === "user" && Array.isArray(s.content) && (s.content[0] as { text: string }).text).toBe("plain\n[note-context: this-message-id=u2]");
+    const again = addTrailers(out, idx);
+    expect(again[0]).toBe(out[0]!);
+    expect(again[1]).toBe(out[1]!);
   });
 });
 
