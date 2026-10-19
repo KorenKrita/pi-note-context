@@ -137,6 +137,14 @@ describe("rollover summary", () => {
     expect(pinned[2]?.text).toBe("third");
   });
 
+  test("pin truncation never splits a surrogate pair", () => {
+    const dropped: SessionEntry[] = [user("u1", "first"), user("u2", `${"x".repeat(19)}😀 tail`), user("u3", `${"y".repeat(119)}😀${"z".repeat(5000)}`)];
+    const pinned = pinUserMessages(dropped, { messageMaxChars: 20, totalMaxTokens: 4096, indexMaxTokens: 3072 });
+    expect(pinned[1]?.text).toBe(`${"x".repeat(19)}…`);
+    const collapsed = pinUserMessages(dropped, { messageMaxChars: 50_000, totalMaxTokens: 30, indexMaxTokens: 3072 });
+    expect(collapsed[2]?.text).toBe("y".repeat(119));
+  });
+
   test("droppedRange spans the previous compaction's retained tail and excludes the compaction entry itself", () => {
     const context: SessionEntry[] = [rolloverEntry("r1", "u0", 2), user("u0", "retained correction: skip Windows"), user("u1", "new task"), ...round(1, 1), toolResult("tk", "cx", "read", "kept")];
     const dropped = droppedRange(context, "tk");

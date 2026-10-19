@@ -104,9 +104,19 @@ function contentText(content: string | readonly { type: string; text?: string }[
   return content.map((c) => (c.type === "text" ? (c.text ?? "") : `[${c.type}]`)).join("\n");
 }
 
+/**
+ * A cut index that does not fall inside a UTF-16 surrogate pair: moved back one
+ * unit when it would split one. A lone surrogate in text sent to a provider
+ * breaks strict JSON consumers, and the rollover summary is persisted.
+ */
+export function cutAt(s: string, i: number): number {
+  const c = s.charCodeAt(i - 1);
+  return i > 0 && i < s.length && c >= 0xd800 && c <= 0xdbff ? i - 1 : i;
+}
+
 function firstLine(s: string): string {
   const line = s.split("\n").find((l) => l.trim().length > 0) ?? "";
-  return line.length > 120 ? `${line.slice(0, 117)}…` : line;
+  return line.length > 120 ? `${line.slice(0, cutAt(line, 117))}…` : line;
 }
 
 function fullJson(v: unknown): string {
@@ -182,8 +192,8 @@ export function search(items: readonly HistoryItem[], opts: SearchOptions): Sear
 
 function snippetAround(text: string, idx: number, len: number, width: number): string {
   const half = Math.max(0, Math.floor((width - len) / 2));
-  const start = Math.max(0, idx - half);
-  const end = Math.min(text.length, idx + len + half);
+  const start = cutAt(text, Math.max(0, idx - half));
+  const end = cutAt(text, Math.min(text.length, idx + len + half));
   const core = text.slice(start, end).replace(/\s+/g, " ");
   return `${start > 0 ? "…" : ""}${core}${end < text.length ? "…" : ""}`;
 }
@@ -239,8 +249,8 @@ export function renderSearch(r: SearchResult, opts: SearchOptions): string {
 export function renderRead(r: ReadResult, page: ReadPage): string {
   const parts: string[] = [];
   const t = r.target.text;
-  const start = Math.min(Math.max(0, page.offset), t.length);
-  const end = Math.min(t.length, start + page.maxChars);
+  const start = cutAt(t, Math.min(Math.max(0, page.offset), t.length));
+  const end = cutAt(t, Math.min(t.length, start + page.maxChars));
   const neighbourBudget = Math.floor(page.maxChars / 4);
   if (start === 0) for (const b of r.before) parts.push(`--- before: [history entry=${b.id}] ${b.role} · ${b.label}\n${clip(b.text, neighbourBudget)}`);
   const range = t.length > page.maxChars ? ` · chars ${start}–${end} of ${t.length}` : "";
@@ -257,5 +267,7 @@ export function renderList(r: { items: HistoryItem[]; total: number; offset: num
 }
 
 function clip(s: string, max: number): string {
-  return s.length <= max ? s : `${s.slice(0, max)}\n…[${s.length - max} more chars; read this entry by id]`;
+  if (s.length <= max) return s;
+  const cut = cutAt(s, max);
+  return `${s.slice(0, cut)}\n…[${s.length - cut} more chars; read this entry by id]`;
 }

@@ -5,7 +5,7 @@
  */
 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { isRolloverDetails, ROLLOVER_DETAILS_KIND } from "./history.ts";
+import { cutAt, isRolloverDetails, ROLLOVER_DETAILS_KIND } from "./history.ts";
 import { estimateTokens, renderNotebook, type Notebook } from "./notebook.ts";
 
 export type RolloverReason = "model" | "user" | "host" | "threshold" | "fallback";
@@ -67,7 +67,7 @@ export function pinUserMessages(dropped: readonly SessionEntry[], opts: PinOptio
   const first = users[0]!;
   out.push({ id: first.id, text: first.text, truncated: false });
   for (const u of users.slice(1)) {
-    const t = u.text.length > opts.messageMaxChars ? `${u.text.slice(0, opts.messageMaxChars)}…` : u.text;
+    const t = u.text.length > opts.messageMaxChars ? `${u.text.slice(0, cutAt(u.text, opts.messageMaxChars))}…` : u.text;
     out.push({ id: u.id, text: t, truncated: t !== u.text });
   }
   const budgetChars = opts.totalMaxTokens * 3.5;
@@ -75,7 +75,8 @@ export function pinUserMessages(dropped: readonly SessionEntry[], opts: PinOptio
   if (total > budgetChars) {
     for (let i = out.length - 1; i >= 1 && total > budgetChars; i--) {
       const p = out[i]!;
-      const line = p.text.split("\n").find((l) => l.trim())?.slice(0, 120) ?? "";
+      const first = p.text.split("\n").find((l) => l.trim()) ?? "";
+      const line = first.slice(0, cutAt(first, 120));
       total -= p.text.length - line.length;
       out[i] = { id: p.id, text: line, truncated: true };
     }
@@ -107,11 +108,8 @@ const LOG_LINE = /^\s*(\{\s*("|$)|\[\{|[[\]{}]{1,2},?\s*$|"[^"\n]+"\s*:|"[^"\n]*
 /** A fence opener at line start; a backtick opener's info string has no backticks (CommonMark). */
 const FENCE_OPEN = /^\s*(?:(`{3,})[^`]*|(~{3,}).*)$/;
 
-/** Cut to max UTF-16 units without splitting a surrogate pair (a lone surrogate breaks strict JSON consumers). */
 function clip(s: string, max: number): string {
-  if (s.length <= max) return s;
-  const hi = s.charCodeAt(max - 1);
-  return `${s.slice(0, hi >= 0xd800 && hi <= 0xdbff ? max - 1 : max)}…`;
+  return s.length > max ? `${s.slice(0, cutAt(s, max))}…` : s;
 }
 
 /**

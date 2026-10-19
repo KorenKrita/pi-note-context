@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { ToolCall } from "@earendil-works/pi-ai";
-import { currentWindow, indexBranch, list, read, renderRead, ROLLOVER_DETAILS_KIND, search } from "../src/history.ts";
+import { currentWindow, cutAt, indexBranch, list, read, renderRead, ROLLOVER_DETAILS_KIND, search } from "../src/history.ts";
 import { NOTEBOOK_ENTRY_TYPE } from "../src/notebook.ts";
 
 const ts = "2026-09-10T00:00:00.000Z";
@@ -125,5 +125,38 @@ describe("queries", () => {
     expect(p.total).toBe(4);
     const w2 = list(items, { window: 2 });
     expect(w2.items.map((i) => i.id)).toEqual(["u2"]);
+  });
+});
+
+describe("cuts never split a surrogate pair", () => {
+  const lone = (s: string) => /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s);
+
+  test("cutAt moves back only from inside a pair", () => {
+    const s = "ab😀c"; // 😀 occupies indices 2–3
+    expect(cutAt(s, 3)).toBe(2);
+    expect(cutAt(s, 2)).toBe(2);
+    expect(cutAt(s, 4)).toBe(4);
+    expect(cutAt(s, 0)).toBe(0);
+    expect(cutAt(s, s.length)).toBe(s.length);
+  });
+
+  test("labels, search snippets and paged reads stay well formed", () => {
+    const text = `${"x".repeat(116)}😀${"y".repeat(500)}NEEDLE${"z".repeat(117)}😀${"w".repeat(600)}`;
+    const items = indexBranch([user("u1", text)]);
+    expect(lone(items[0]!.label)).toBe(false);
+    expect(lone(search(items, { query: "NEEDLE", snippetChars: 241 }).hits[0]!.snippet)).toBe(false);
+    const r = read(items, "u1", 0)!;
+    let offset = 0;
+    let seen = "";
+    for (let guard = 0; guard < 50; guard++) {
+      const page = renderRead(r, { offset, maxChars: 117 });
+      expect(lone(page)).toBe(false);
+      const body = page.split("\n").slice(1).join("\n");
+      const next = /offset: (\d+) \}\)\]$/.exec(page);
+      seen += next ? body.slice(0, body.lastIndexOf("\n\n…[")) : body;
+      if (!next) break;
+      offset = Number(next[1]);
+    }
+    expect(seen).toBe(text); // pages tile the text exactly
   });
 });
