@@ -26,7 +26,7 @@ import { appendLedger, flushLedger } from "./ledger.ts";
 import { fallbackThreshold, maintenanceRequestText, reminderText, reminderThreshold, step, zoneFor, type MaintenanceState, type Thresholds } from "./maintenance.ts";
 import { applySections, makeRecord, NOTEBOOK_ENTRY_TYPE, reconstructNotebook, renderNotebook, type Notebook } from "./notebook.ts";
 import { estimateTokens as estimateText } from "./notebook.ts";
-import { droppedRange, makeDetails, pinUserMessages, renderRolloverSummary, type RolloverReason } from "./rollover.ts";
+import { droppedRange, indexUserMessages, makeDetails, pinUserMessages, renderRolloverSummary, type RolloverReason } from "./rollover.ts";
 import { appendSuffixPatch, renderStatusLine, StatusOdometer, tokensSinceReview, turnsSince } from "./status.ts";
 import { addTrailers, buildIdIndex } from "./trailers.ts";
 
@@ -177,7 +177,9 @@ export default function noteContext(pi: ExtensionAPI): void {
     const context = contextOf(ctx);
     const cut = projectCut(context, compactionSettings(ctx).keepRecentTokens);
     const pinned = cut.firstKeptEntryId ? pinUserMessages(droppedRange(context, cut.firstKeptEntryId), config.pin) : [];
-    return estimateText(renderRolloverSummary({ window: currentWindow(branchOf(ctx)) + 1, reason: "model", notebook, pinned }));
+    const branch = branchOf(ctx);
+    const index = indexUserMessages(branch, cut.firstKeptEntryId, new Set(pinned.map((p) => p.id)), config.pin);
+    return estimateText(renderRolloverSummary({ window: currentWindow(branch) + 1, reason: "model", notebook, pinned, index }));
   }
 
   /** Freshness against a concrete cut: true when nothing that will be dropped post-dates the notebook's review marker. */
@@ -446,6 +448,7 @@ export default function noteContext(pi: ExtensionAPI): void {
       return null;
     }
     const pinned = pinUserMessages(droppedRange(context, firstKeptEntryId), config.pin);
+    const index = indexUserMessages(branch, firstKeptEntryId, new Set(pinned.map((p) => p.id)), config.pin);
     const session = sessionId(ctx);
     const record = () => {
       appendLedger({ kind: "rollover", session, fromWindow: window, reason, notebookRevision: notebook.revision, reclaim: null, pinned: pinned.length });
@@ -454,7 +457,7 @@ export default function noteContext(pi: ExtensionAPI): void {
         cacheAcc = { calls: 0, cacheRead: 0, input: 0 };
       }
     };
-    return { summary: renderRolloverSummary({ window: window + 1, reason, notebook, pinned }), details: makeDetails(window + 1, reason, notebook, pinned), record };
+    return { summary: renderRolloverSummary({ window: window + 1, reason, notebook, pinned, index }), details: makeDetails(window + 1, reason, notebook, pinned), record };
   }
 
   /** Volatile state for a freshly opened window. */

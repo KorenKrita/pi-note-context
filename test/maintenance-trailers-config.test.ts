@@ -178,5 +178,8 @@ describe("config", () => {
     expect(parseConfig({ budgetTokens: 300_000 }).fallbackBudgetTokens).toBe(300_000);
     expect(parseConfig({ budgetTokens: 400_000, fallbackBudgetTokens: 800_000 }).fallbackBudgetTokens).toBe(800_000);
     expect(parseConfig({ budgetTokens: 400_000, fallbackBudgetTokens: 1_000 }).fallbackBudgetTokens).toBe(400_000);
+    expect(DEFAULT_CONFIG.pin.indexMaxTokens).toBe(3072);
+    expect(parseConfig({ sessionIndexMaxTokens: 1_000 }).pin.indexMaxTokens).toBe(1_000);
+    expect(parseConfig({ sessionIndexMaxTokens: 10 }).pin.indexMaxTokens).toBe(DEFAULT_CONFIG.pin.indexMaxTokens);
   });
 });

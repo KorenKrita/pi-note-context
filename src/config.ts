@@ -70,6 +70,7 @@ export function parseConfig(raw: unknown): Config {
     pin: {
       messageMaxChars: num(r["pinnedMessageMaxChars"], DEFAULT_PIN.messageMaxChars, 40),
       totalMaxTokens: num(r["pinnedTotalMaxTokens"], DEFAULT_PIN.totalMaxTokens, 128),
+      indexMaxTokens: num(r["sessionIndexMaxTokens"], DEFAULT_PIN.indexMaxTokens, 128),
     },
     externalCompactionModels: Array.isArray(r["externalCompactionModels"]) ? r["externalCompactionModels"].filter((x): x is string => typeof x === "string") : [],
     historyReadMaxChars: num(r["historyReadMaxChars"], DEFAULT_CONFIG.historyReadMaxChars, 500),

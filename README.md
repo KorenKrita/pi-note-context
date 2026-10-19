@@ -6,7 +6,7 @@ Three model-invoked tools:
 
 - `notes` — a small, sectioned checkpoint of working state that survives context-window rollovers
 - `history` — read back earlier conversation, including what left the window
-- `new_context` — start a fresh window without an LLM summary; the new window opens with the notebook snapshot and the task-defining user messages
+- `new_context` — start a fresh window without an LLM summary; the new window opens with the notebook snapshot, a one-line index of every earlier user message, and the task-defining user messages
 
 Design: [`docs/DESIGN.md`](docs/DESIGN.md). Independent review and responses: [`docs/review/`](docs/review/).
 
@@ -37,6 +37,7 @@ Optional `~/.pi/agent/pi-note-context.json` (global only; every field optional):
   "minReclaimTokens": 20000,
   "pinnedMessageMaxChars": 600,
   "pinnedTotalMaxTokens": 4096,
+  "sessionIndexMaxTokens": 3072,
   "externalCompactionModels": [],
   "entryIdTrailers": true,
   "autoRollover": true,
@@ -53,6 +54,8 @@ Optional `~/.pi/agent/pi-note-context.json` (global only; every field optional):
 `statusStepTokens` (default 40K): the status line is appended to a tool result (and persisted with it, so provider prompt caches keep hitting) when context usage crosses a multiple of this, or when tokens added since the last notes write/review cross it — not on every call. Shape: `[note-context] 142K/400K budget (1M window) · notes rev 7, +52K since review`.
 
 `autoRollover` (default `true`): after a notes write that passes the gate, the host schedules the rollover itself — the model does not need to call `new_context`. The host only does this from the reminder threshold on; below it the model must call `new_context` itself. The same gate runs again when the turn settles; if it no longer passes (unreviewed work would be dropped, pressure fell below the floor, the model changed to an external compaction owner) the schedule is cancelled (ledger `rollover_cancelled` with the blocker) rather than handed to Pi's LLM summary, and the next notes write re-arms it. A run the user aborts (ESC) also cancels a pending host or model schedule (`why: "user_abort"`): no compaction and no continuation turn; only an explicit `userRequested` rollover survives the abort.
+
+`sessionIndexMaxTokens` (default 3072): budget for the rollover summary's index of earlier user messages — one line per message (`w3 [history entry=…] …`, ~80 chars; attachments, quotes, fenced code and pasted log lines collapse to tags like `[file: x]`, `[log 40 lines]`). Over budget, lines shorten to ~40 chars, then the oldest are dropped behind a count line. It tells a fresh window what the session already worked on, so the model checks `history` before redoing an investigation.
 
 `externalCompactionModels` lists `provider/model` ids whose compaction is owned by another extension (e.g. remote Codex compaction); this plugin then yields the summary step for those models but keeps notes, history, reminders and the status line.
 

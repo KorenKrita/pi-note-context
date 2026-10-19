@@ -126,6 +126,36 @@ describe("Pi host integration", () => {
     expect(compaction?.details?.reason).toBe("model");
   });
 
+  test("a second rollover indexes the first window's user messages", async () => {
+    const { session, seen } = await host(
+      (s) => [
+        record(s, fauxAssistantMessage("Ready.")),
+        record(s, fauxAssistantMessage(fauxToolCall("dump", {}), { stopReason: "toolUse" })),
+        record(s, fauxAssistantMessage(fauxToolCall("notes", { sections: { Task: "parser", Next: "edit parseComment" } }), { stopReason: "toolUse" })),
+        record(s, fauxAssistantMessage(fauxToolCall("new_context", {}), { stopReason: "toolUse" })),
+        record(s, fauxAssistantMessage("Ending the turn for the rollover.")),
+        record(s, fauxAssistantMessage("Continuing from the notebook.")),
+        record(s, fauxAssistantMessage("Okay, forks next.")),
+        record(s, fauxAssistantMessage(fauxToolCall("dump", {}), { stopReason: "toolUse" })),
+        record(s, fauxAssistantMessage(fauxToolCall("notes", { sections: { Task: "fork review", Next: "compare forks" } }), { stopReason: "toolUse" })),
+        record(s, fauxAssistantMessage(fauxToolCall("new_context", {}), { stopReason: "toolUse" })),
+        record(s, fauxAssistantMessage("Ending the turn again.")),
+        record(s, fauxAssistantMessage("Continuing in window 3.")),
+      ],
+      { autoRollover: false, minReclaimTokens: 1_000 },
+    );
+    await promptLong(session);
+    await session.prompt("Now review the forks.");
+    await session.prompt(`Fork dump: ${LONG}`);
+    await session.waitForIdle();
+    session.dispose();
+
+    const last = text(seen.at(-1)!);
+    expect(last).toContain("Context window #3 started");
+    expect(last).toContain("## Earlier user messages in this session");
+    expect(last).toMatch(/w1 \[history entry=[A-Za-z0-9_-]+\] Refactor the parser\./);
+  });
+
   test("fallback rollover lands at the checkpoint's turn_end without aborting the run", async () => {
     const { session, sessionManager, seen, events } = await host(
       (s) => [
