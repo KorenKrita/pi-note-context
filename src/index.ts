@@ -53,7 +53,7 @@ const HistoryParams = Type.Object({
 });
 
 const NewContextParams = Type.Object({
-  userRequested: Type.Optional(Type.Boolean({ description: "True only when the user explicitly asked for a fresh window; never for a rollover you decided on. Skips the reclaim and pressure thresholds; notebook checks still apply. Default false." })),
+  userRequested: Type.Optional(Type.Boolean({ description: "True only when the user explicitly asked for a fresh window; never for a rollover you decided on. Skips the minimum-reclaim check; notebook checks still apply. Default false." })),
 });
 const MAINTENANCE_CUSTOM_TYPE = "note-context/maintenance";
 /** Custom type of the per-request status message written by versions ≤ 0.3; filtered out of context, never written. */

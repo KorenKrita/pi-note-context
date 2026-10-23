@@ -34,6 +34,6 @@ export const HISTORY_SNIPPET = "Search or read earlier conversation in the curre
 
 
 export const NEW_CONTEXT_DESCRIPTION = `Start a fresh context window at the end of this turn, without an LLM summary. The new window opens with the notebook snapshot, a one-line index of earlier user messages, and the task-defining user messages from this window; everything else stays readable with \`history\`.
-Call it alone, after the notes result has returned; never in the same batch as \`notes\` or other tools. Calling this tool attests that the current notebook revision is sufficient to continue. Refused if notes are missing or older than what would leave the window, nothing would leave the window, the reclaim is below the configured minimum (not checked with \`userRequested\`), or a rollover is already scheduled; update notes or keep working and retry later.
+Call it alone, after the notes result has returned; never in the same batch as \`notes\` or other tools. Calling this tool attests that the current notebook revision is sufficient to continue. Refused if notes are missing or older than what would leave the window, nothing would leave the window, the reclaim is below the configured minimum (not checked with \`userRequested\`), or you already scheduled a rollover (a host-scheduled one is confirmed instead); update notes or keep working and retry later.
 On success, end the turn without further tool calls.`;
 export const NEW_CONTEXT_SNIPPET = "Start a fresh context window at the end of this turn";
