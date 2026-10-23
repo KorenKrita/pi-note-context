@@ -26,7 +26,7 @@ Canonical sections: ${CANONICAL_SECTIONS.join(", ")}. Custom names allowed; at m
 Limits: 16 KiB and ~4K tokens. An oversized write is rejected whole and the previous revision stands; prune and add in one call. The result reports revision and remaining capacity, not the text.`;
 
 export const HISTORY_DESCRIPTION = `Read back this session's earlier conversation, including everything that left the context window after a rollover. Read-only.
-\`query\`: literal substring search → chronological hits with \`[history entry=ID]\` ids and snippets; \`offset\` skips matching entries. \`id\`: read one entry with \`context\` neighbours on each side (default 1) so a tool result arrives with its call; long entries are paged — the footer gives the \`offset\` for the next page. \`list: true\`: chronological listing for discovery. \`window\` restricts any mode to one context window number.
+\`query\`: literal substring search → chronological hits with \`[history entry=ID]\` ids and snippets. \`id\`: read one entry with \`context\` neighbours on each side (default 1) so a tool result arrives with its call; long entries are paged with \`offset\`. \`list: true\`: chronological listing for discovery. \`window\` restricts any mode to one context window number.
 Indexed: user and assistant messages, tool results, shell runs, compaction summaries, notebook revisions. Not indexed: material excluded from model context, other extensions' private entries, and history results themselves.`;
 
 export const NOTES_SNIPPET = "Read or update the sectioned session notebook that survives context-window rollovers";

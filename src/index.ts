@@ -48,8 +48,8 @@ const HistoryParams = Type.Object({
   context: Type.Optional(Type.Integer({ minimum: 0, maximum: 5, description: "Neighbouring entries on each side when reading by id. Default 1." })),
   list: Type.Optional(Type.Boolean({ description: "Chronological listing." })),
   window: Type.Optional(Type.Integer({ minimum: 1, description: "Restrict to one context window number." })),
-  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
-  offset: Type.Optional(Type.Integer({ minimum: 0, description: "list: entries to skip. query: matching entries to skip. id: character offset into the entry text." })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Maximum entries returned. query: default 20. list: default 50. Ignored with id." })),
+  offset: Type.Optional(Type.Integer({ minimum: 0, description: "Paging start; the unit depends on the mode. list: entries to skip. query: matching entries to skip. id: character position in the entry text. query and id results print the next value. Default 0." })),
 });
 
 const NewContextParams = Type.Object({
