@@ -87,22 +87,26 @@ Output is bounded by a character budget with pagination.
 
 ## 4. Injection
 
-### 4.1 Status line — a suffix on tool results, stepped
+### 4.1 Status line — a notes-staleness nudge on tool results, stepped
 
-One line of facts appended to the last text part of a tool result and persisted with it:
+One line appended to the last text part of a tool result and persisted with it:
 
 ```
-[note-context] 142K/400K budget (1M window) · notes rev 7, +52K since review
+[note-context] notes rev 7 not reviewed for a while — update them, or call notes({reviewed:true}) if they are still accurate
+[note-context] no notes yet — write them once there is working state worth keeping
+[note-context] notes rev 7 · branch changed — verify workspace state
 ```
 
-Facts only: context tokens against the budget scale (§8), notebook revision, and tokens added to the context since the notebook was last written or reviewed (`reviewedTokens`, stored on the notebook record at write time; absent on older records, in which case the clause is omitted). After a compaction `tokens` is unknown and shown as `?/400K`. No window number: the rollover summary (§5) already opens with it, and `history`'s `window` filter needs nothing more.
+It tells the model only whether its notes are stale, plus two one-shot facts (`branch changed — verify workspace state` after `/tree`, `compaction: external` once per window when another extension owns compaction). **No token, budget or window figures.** The host owns rollover timing (reminder, auto-rollover, forced fallback, §6); the model is not asked to judge context pressure. Staleness is still measured in tokens added to the context since the notebook was last written or reviewed (`reviewedTokens`, stored on the notebook record at write time; absent on older records, which then never go stale on tokens). With no notebook, the whole context counts as unreviewed.
 
-**Delivery.** `tool_result` handler; never on this plugin's own tool results or on error results. One step size, `statusStepTokens` (default 40K = 10% of the default budget = the smallest reclaim a rollover can make), drives two independent ticks:
+**Why no figures (2026-10-23).** The previous shape was `142K/400K budget (1M window) · notes rev 7, +52K since review`, and the reminder opened with `~18K tokens before forced rollover`. Anthropic's guidance for the current models says per-tool-result token/budget countdowns cause "context anxiety" (the model proposes new sessions or trims its own work; "avoid showing explicit context-budget counts"), and that on Sonnet/Haiku 5.5 a self-added countdown after tool results makes genuine mid-turn user messages read as prompt injection. The anxiety was observed in real sessions here. Usage figures stay in the ledger and user-facing UI.
 
-- pressure: `floor(tokens / step)` differs from the last delivered reading (either direction);
-- staleness: `floor(tokensSinceReview / step)` ≥ 1 and not yet delivered for this notebook revision — a write or `reviewed: true` re-arms it.
+**Delivery.** `tool_result` handler; never on this plugin's own tool results or on error results. `statusStepTokens` (default 40K = 10% of the default budget = the smallest reclaim a rollover can make) is the staleness step:
 
-The first reading of a window (session start, after our compaction) and the reading after `/tree` navigation always deliver. A result with no text part leaves the tick armed for the next one. Turns without tool calls carry no reading; the reminder (§6) covers pressure independently.
+- with notes: `floor(tokensSinceReview / step)` ≥ 1 and not yet delivered for this notebook record — a write or `reviewed: true` re-arms it;
+- without notes: once (step 0, also when usage is unknown), then once per further step of context.
+
+Overall usage crossing a step is **not** a trigger, in either direction. The `/tree` reading and the external-compaction fact are delivered once (the latter re-armed per window). A result with no text part leaves the tick armed for the next one. Turns without tool calls carry no reading; the reminder (§6) covers rollover independently.
 
 **Why a suffix and not a trailing message.** The first implementation pushed a fresh `custom` message at the end of every request from the `context` handler. Bisecting 25 installed extensions against a three-tool-call probe showed it was the only one that froze OpenAI Responses `cacheRead` (a constant trailing message froze it too; entry-id trailers did not): each request's prompt was no longer a prefix of the next, so only the system/tools prefix ever hit. The same session cost 50–90K `cacheWrite` per call for the rest of the window. Anthropic's explicit `cache_control` breakpoints were unaffected, which is why the regression went unnoticed. A suffix inside an already-persisted entry replays byte-for-byte; the odometer keeps the count of such suffixes near one per 40K tokens instead of one per call.
 
@@ -116,7 +120,7 @@ The notebook text enters context at:
 2. **Window start** — embedded verbatim in the rollover summary (§5), so recovery does not depend on the plugin being loaded.
 3. **Threshold reminder** — attached to the one-per-window reminder (§6) so the model edits against the current text without a read call.
 
-It is **not** injected on every call. Rationale: constant injection of a 4K-token block across a 200-turn session costs ~800K duplicated input tokens and invalidates the prompt cache on every notebook change. Codex reads notes on demand and instead injects a server-generated `thread_hint` (≤4 KB) once at each new window; oh-my-pi's per-call injection (PR #10893, a three-day local re-implementation of the Codex feature announced with Astra, 2026-09-05→08) is the cheapest way to fill the gap left by having no `thread_hint`, and its PR states no cost or cache impact was measured. Here the snapshot embedded in the rollover summary (§5) plays the `thread_hint` role, and the status line's `+NK since review` replaces constant presence with visible staleness — delivered the way §4.1 describes, because the same cache argument applies to any per-call trailing message, however small.
+It is **not** injected on every call. Rationale: constant injection of a 4K-token block across a 200-turn session costs ~800K duplicated input tokens and invalidates the prompt cache on every notebook change. Codex reads notes on demand and instead injects a server-generated `thread_hint` (≤4 KB) once at each new window; oh-my-pi's per-call injection (PR #10893, a three-day local re-implementation of the Codex feature announced with Astra, 2026-09-05→08) is the cheapest way to fill the gap left by having no `thread_hint`, and its PR states no cost or cache impact was measured. Here the snapshot embedded in the rollover summary (§5) plays the `thread_hint` role, and the status line's staleness nudge replaces constant presence with visible staleness — delivered the way §4.1 describes, because the same cache argument applies to any per-call trailing message, however small.
 
 ### 4.3 Entry ids
 
@@ -176,13 +180,15 @@ Pi's own threshold is `contextWindow − reserveTokens`. This plugin acts earlie
 **Reminder** — once per window, when `usage.tokens ≥ threshold − leadTokens` (default lead 24K): a steered message
 
 ```
-[note-context] ~18K tokens before forced rollover. Update notes against what will leave the window (current notebook below), or `notes({reviewed:true})` if it is already sufficient. Then call `new_context`.
+[note-context] A context-window rollover is due. Update notes against what will leave the window (current notebook below), or call notes({reviewed:true}) if they are already sufficient. Then call new_context.
 <notebook>
 ```
 
+No token counts (§4.1): the reminder asks for the action, not a judgement about how much room is left.
+
 **Fallback state machine** — entered when `usage.tokens ≥ threshold − fallbackBufferTokens` (default 12K) and no rollover is pending:
 
-1. `maintenance:requested` — steer: `[note-context] Context is nearly exhausted. Make one notes write (or reviewed:true) now. Do not call other tools.` Scope the reminder to this attempt id.
+1. `maintenance:requested` — steer: `[note-context maintenance #N] The host needs a notes checkpoint before it starts a new window. Make one notes write (or notes({reviewed:true})) now; the host will start a new window as soon as it lands. Do not call other tools.` Scope the reminder to this attempt id.
 2. Next turn: if a notebook write/review lands → `maintenance:checkpointed`; the **host** rolls over at that turn's `turn_end` boundary (compaction + continuation entries, `continue: true`), inside the run. The model is not asked for a second `new_context`. A declined template there hands the window to Pi's threshold compaction.
 3. If the write fails (oversized, invalid) → one repair attempt with the specific error; then step 4.
 4. If no valid checkpoint after the repair attempt, or Pi's own overflow path fires first → return `undefined` from `session_before_compact` so Pi's LLM summary runs. **Never** perform the template rollover without a valid notebook.
@@ -194,11 +200,11 @@ Tool dispatch enforcement during `maintenance:requested`: a `tool_call` handler 
 
 Added to the system prompt as the `note_context` section of `systemPromptOptions.sections` in `before_agent_start` (not a returned `systemPrompt`, which would force a whole-prompt replacement). Final text:
 
-> **Working notes across context windows.** Keep a compact checkpoint in `notes`: the task and its binding constraints, observed state (label `untested`, `inferred`, `blocked`), decisions with one-line reasons and ruled-out directions, the next action, and exact references (`[history entry=…]`, file:line, commands). Update it after meaningful batches of work and when the status line (a `[note-context]` line at the end of a tool result: context tokens used, and tokens added since your last notes review) or a reminder shows it is stale — not after every edit.
+> **Working notes across context windows.** Keep a compact checkpoint in `notes`: the task and its binding constraints, observed state (label `untested`, `inferred`, `blocked`), decisions with one-line reasons and ruled-out directions, the next action, and exact references (`[history entry=…]`, file:line, commands). Update it after meaningful batches of work and when the status line (a `[note-context]` line at the end of some tool results, shown when your notes are missing or have not been reviewed for a while) or a reminder says they are stale — not after every edit.
 >
 > A `[note-context: this-message-id=ID]` line at the end of a user message or tool result is added by this extension and names that message itself; it is not something the user wrote, a citation of another entry, or a request to read history. Record it in notes as `[history entry=ID]` when the message is worth pointing back to; never call `history` because the marker is present.
 >
-> When your notes are current and the window holds a substantial amount of finished work, the host may schedule a rollover on its own — the notes result will say so; finish what the turn needs and end it. You can also request one yourself with `new_context` when the window holds finished work that no longer needs to be in view — an exploration whose conclusions are recorded, a completed unit whose outcome is verified and noted, a large output whose result is captured — or when the status line shows pressure. A milestone alone is not a reason; the test is whether what leaves the window is either in notes or has an exact reference. Rolling over before answering the user is fine when continuing the task needs it.
+> The host tracks context size and decides when a rollover is needed; you do not need to watch it. When your notes are current and the window holds a substantial amount of finished work, the host may schedule a rollover on its own — the notes result will say so; finish what the turn needs and end it. You can also request one yourself with `new_context` when the window holds finished work that no longer needs to be in view — an exploration whose conclusions are recorded, a completed unit whose outcome is verified and noted, a large output whose result is captured. A milestone alone is not a reason; the test is whether what leaves the window is either in notes or has an exact reference. Rolling over before answering the user is fine when continuing the task needs it.
 >
 > If the user explicitly asks for a fresh window, update or review notes first, then call `new_context({userRequested:true})`.
 >
@@ -268,7 +274,7 @@ src/
   rollover.ts     session_before_compact handler, summary template, pinned-request selection
   maintenance.ts  reminder + fallback state machine, tool-dispatch guard
   history.ts      allowlisted index, search/read/list, id trailers
-  status.ts       status line, usage wrapper (null-safe)
+  status.ts       status line (notes staleness), odometer, suffix patch
   guidance.ts     system-prompt section and tool descriptions (single source)
   ledger.ts       observability
 test/
@@ -289,7 +295,7 @@ Pi peer version: `0.87.x`. Tests: Bun. Host fixture on real Pi for: gate blocker
 - **Fallback compaction** runs at the `turn_end` of the turn whose notes call landed the checkpoint, as boundary entries, without aborting the run (Pi 0.87; before that `ctx.compact()` aborted the run and a follow-up resumed it). Verified end to end on a 60K-window model (pre-0.87): reminder → notes → maintenance request → notes → template rollover with `reason: "fallback"`; the boundary path is covered by `test/pi-host.test.ts`.
 - **Compaction settings** are read through Pi's exported `SettingsManager` (global + project), so gate projection and pressure zones follow the user's `keepRecentTokens` / `reserveTokens`; Pi's documented defaults apply only if reading fails.
 - **Threshold rollover without a model request** (Pi's own threshold fires first): the template rollover is used only when the notebook's `reviewedThrough` is at or after the last dropped entry; otherwise Pi's LLM summary runs (`rollover_declined: stale_notebook_at_threshold` in the ledger).
-- **Status line** is appended at the end of the message array in the `context` event; Pi guarantees this is a protocol boundary at `transformContext` time.
+- **Status line** is a suffix patch on a persisted tool result (`tool_result` hook), never a trailing message (§4.1).
 - **Entry-id trailers** match journal entries to context messages by `(role, timestamp, toolCallId)`; assistant messages are never modified.
 - **Window boundary for gate and pinning** is the compaction-aware active context (`ctx.sessionManager.buildContextEntries()`), not "entries after the last compaction": Pi keeps the previous compaction's retained tail in view, so it is droppable by the next compaction and any user correction inside it must be pinned. Freshness is re-checked in `session_before_compact` against the *actual* `preparation.firstKeptEntryId` for every trigger (model, threshold, manual), since the gate's projection can be stale by the time compaction runs.
 - **Mid-run auto-compaction.** Pi may run threshold compaction before the next assistant response inside an active run. The template is declined there (`rollover_declined: auto_compaction_mid_run`) unless the compaction was initiated by this plugin's own `ctx.compact()`; Pi's LLM summary runs instead.
@@ -309,7 +315,7 @@ Observation from real use and from the pi-context ledger: models rarely produce 
 - **Re-check at settle (added 2026-09-11, evening).** The host gate passes at notes-write time, but the model is told to finish the turn and may keep working; in one real session ~25 tool calls landed after the write, so by `agent_settled` the cut Pi would make had moved past `reviewedThrough`. `session_before_compact` correctly declined the template (`stale_notebook_at_cut`) and the turn fell through to Pi's LLM summary; the session shows no compaction entry after that point. The world can also move the other way before settle: ObservationPack placeholders shrink the live context so `getContextUsage()` drops, the model (and its window) can change, or a model in `externalCompactionModels` can become active. So the schedule is re-run through the **same** host gate (`evaluateGate` with the pressure floor, plus the external-owner yield) at settle (`agent_before_settle` since Pi 0.87, and again at `agent_settled` for schedules handed on); if it no longer passes, `ctx.compact()` is **not** called and the ledger gets `rollover_cancelled { reason: "host", why: <gate blocker> | external_owner }`. The next notes write re-arms it. The model path (`new_context`) is not re-checked — the call is the judgment — and manual, threshold and fallback paths are unchanged. A `ctx.compact()` error on any scheduled path is recorded as `rollover_failed { reason, why }` where `why` is a stable category (`cancelled`, `already_compacted`, `nothing_to_compact`, `no_model`, `other`), never the error text — the ledger stays counts and ids only.
 - **Floor = reminder threshold (2026-09-23).** `autoRolloverFloorPercent` is removed. The host may auto-roll only once the window is in the reminder zone (`budget − reserveTokens − leadTokens`), i.e. after the model has been told to checkpoint; below it only `new_context` rolls over. At 50% the host rolled mid-task on every notes write past 200K, which the user found intrusive.
 - **User abort cancels (2026-09-23).** Real session 01a0c846… 2026-09-22 09:35–09:38: notes armed a host schedule, the model kept working 3 minutes, the user pressed ESC; `agent_settled` still compacted and `note-context/continue` (`triggerTurn: true`) restarted the run the user had stopped. The gate re-check passed because the unreviewed work sat in the retained tail. Now `turn_end`/`agent_end` read `ctx.signal.aborted` (Pi awaits listeners inside the active run, so this is the run's signal; the assistant `stopReason` is not used because pi-error-auto can rewrite an abort into `error`), `agent_start` clears it, and `agent_before_settle` (or `agent_settled` for schedules it hands on) cancels a pending `host` or `model` schedule with `rollover_cancelled { why: "user_abort" }`. A `user` schedule survives. An aborted `turn_end` also sends no reminder or maintenance steer. Continued work after a notes write does **not** invalidate the schedule; the freshness gate still guards the cut.
-- **Split budgets (2026-09-23).** `fallbackBudgetTokens` (default = `budgetTokens`) scales only the forced fallback zone; `budgetTokens` keeps the status line, reminder and host floor. The reminder text counts down to the forced threshold.
+- **Split budgets (2026-09-23).** `fallbackBudgetTokens` (default = `budgetTokens`) scales only the forced fallback zone; `budgetTokens` keeps the reminder and host floor. (The reminder text used to count down to the forced threshold; since 2026-10-23 it carries no token counts, §4.1.)
 - **Re-check at `turn_end` too.** The pressure maintenance in `turn_end` (§6) is skipped while a rollover is pending, on the assumption that the pending rollover will relieve the pressure. A host schedule that went stale inside the run would then have masked maintenance for every turn until settle, where it is cancelled without any compaction — leaving the window in the fallback zone with nothing acting on it. So the host re-check runs first at every assistant `turn_end`: a stale host schedule is cancelled there, and the existing bounded checkpoint/guard machinery (`MAX_REPAIRS`, `MAX_BLOCKED_CALLS`) takes over in the same run when pressure is in the fallback zone. A cancellation for `low_pressure` does not start maintenance: the zone check decides that, as before.
 
 Verified live (Pi 0.85.1, deepseek-v4-flash, model instructed never to call `new_context`): notes → 4 large reads → notes → host scheduled → template rollover `reason: host` → continuation → task completed.
@@ -323,4 +329,4 @@ Verified live (Pi 0.85.1, deepseek-v4-flash, model instructed never to call `new
 
 ## 17. Budget scale (added 2026-09-11)
 
-Pi's own compaction threshold is `contextWindow − reserveTokens`; on a 1M window that is ~984K, far past the point where attention quality has degraded. All pressure logic in this plugin (reminder zone, fallback zone, status line) therefore reads against `min(contextWindow, budgetTokens)` with `budgetTokens` defaulting to 400K. The fallback state machine rolls over itself, so Pi's physical threshold is never the operative one on large windows. The status line names the scale: `142K/400K budget (1M window)`.
+Pi's own compaction threshold is `contextWindow − reserveTokens`; on a 1M window that is ~984K, far past the point where attention quality has degraded. All pressure logic in this plugin (reminder zone, fallback zone, host auto-rollover floor) therefore reads against `min(contextWindow, budgetTokens)` with `budgetTokens` defaulting to 400K. The fallback state machine rolls over itself, so Pi's physical threshold is never the operative one on large windows.
