@@ -64,8 +64,8 @@ export interface StatusReading {
 /**
  * Decides when a reading is delivered. Overall context usage is not a trigger; only:
  *  - staleness: `floor(tokensSinceReview / step)` rises above the highest value delivered for the
- *    current notebook record (≥ 1 with notes; ≥ 0 with no notes, so "no notes yet" shows
- *    once and then once per further step). A notes write or review is a new record and re-arms it;
+ *    current notebook record, from step 1 (with no notes too: a short task that never builds
+ *    up a step of context is not nudged). A notes write or review is a new record and re-arms it;
  *  - one-shot facts: the reading after /tree navigation (`force`), and `compaction: external`
  *    once per window.
  * A notebook record with unknown `reviewedTokens` (written by an older version) never goes stale here.
@@ -101,15 +101,10 @@ export class StatusOdometer {
     let staleDue = false;
     if (step > 0 && sinceReview !== null) {
       const s = Math.max(0, Math.floor(sinceReview / step));
-      const min = notebook.revision === 0 ? 0 : 1;
-      if (s >= min) {
+      if (s >= 1) {
         staleStep = s;
         staleDue = this.lastStale === null || this.lastStale.entryId !== notebook.entryId || this.lastStale.step < s;
       }
-    } else if (notebook.revision === 0 && (this.lastStale === null || this.lastStale.entryId !== notebook.entryId)) {
-      // No notes and usage unknown: still nudge once.
-      staleStep = 0;
-      staleDue = true;
     }
     const externalDue = externalCompaction && !this.externalShown;
     if (!this.forced && !staleDue && !externalDue) return undefined;

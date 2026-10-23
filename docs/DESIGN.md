@@ -104,7 +104,7 @@ It tells the model only whether its notes are stale, plus two one-shot facts (`b
 **Delivery.** `tool_result` handler; never on this plugin's own tool results or on error results. `statusStepTokens` (default 40K = 10% of the default budget = the smallest reclaim a rollover can make) is the staleness step:
 
 - with notes: `floor(tokensSinceReview / step)` ≥ 1 and above the highest step delivered for this notebook record — a write or `reviewed: true` re-arms it; usage falling back and rising again does not repeat a step. When the notebook record precedes the latest compaction, `tokensSinceReview` counts from the first known usage of the current window, because usage restarts after a rollover (after a reload, from the first reading after it);
-- without notes: once (step 0, also when usage is unknown), then once per further step of context.
+- without notes: once per step of context, starting at step 1, so a short task that never builds up a step is not nudged; nothing when usage is unknown.
 
 Overall usage crossing a step is **not** a trigger, in either direction. The `/tree` reading and the external-compaction fact are delivered once (the latter re-armed per window). A result with no text part leaves the tick armed for the next one. Turns without tool calls carry no reading; the reminder (§6) covers rollover independently.
 

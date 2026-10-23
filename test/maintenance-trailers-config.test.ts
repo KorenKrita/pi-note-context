@@ -158,10 +158,10 @@ describe("status line", () => {
     expect(at(171_000)).toContain("not reviewed");
     expect(at(165_000)).toBeUndefined();
     expect(at(171_000)).toBeUndefined();
-    expect(at(15_000, EMPTY_NOTEBOOK)).toContain("no notes yet");
     expect(at(41_000, EMPTY_NOTEBOOK)).toContain("no notes yet");
-    expect(at(39_000, EMPTY_NOTEBOOK)).toBeUndefined();
-    expect(at(41_000, EMPTY_NOTEBOOK)).toBeUndefined();
+    expect(at(81_000, EMPTY_NOTEBOOK)).toContain("no notes yet");
+    expect(at(79_000, EMPTY_NOTEBOOK)).toBeUndefined();
+    expect(at(81_000, EMPTY_NOTEBOOK)).toBeUndefined();
   });
 
   const step = 40_000;
@@ -192,14 +192,15 @@ describe("status line", () => {
     expect(at(120_000, written)).toBeUndefined(); // usage fell a step: not a trigger any more
     expect(at(212_000, written)).toContain("notes rev 3 not reviewed");
   });
-  test("no notes yet: shown once, then once per further step", () => {
+  test("no notes yet: quiet until the first step of context, then once per further step", () => {
     const { at } = meter();
-    expect(at(15_000, EMPTY_NOTEBOOK)).toContain("no notes yet");
-    expect(at(30_000, EMPTY_NOTEBOOK)).toBeUndefined();
+    expect(at(15_000, EMPTY_NOTEBOOK)).toBeUndefined(); // a short task is not nudged
+    expect(at(39_000, EMPTY_NOTEBOOK)).toBeUndefined();
     expect(at(41_000, EMPTY_NOTEBOOK)).toContain("no notes yet");
-    expect(at(null, EMPTY_NOTEBOOK)).toBeUndefined(); // already nudged for this (absent) notebook
-    const m2 = meter();
-    expect(m2.at(null, EMPTY_NOTEBOOK)).toContain("no notes yet"); // usage unknown: still one nudge
+    expect(at(60_000, EMPTY_NOTEBOOK)).toBeUndefined();
+    expect(at(81_000, EMPTY_NOTEBOOK)).toContain("no notes yet");
+    expect(at(null, EMPTY_NOTEBOOK)).toBeUndefined(); // usage unknown: no nudge
+    expect(meter().at(null, EMPTY_NOTEBOOK)).toBeUndefined();
   });
   test("one-shot facts: branch change and external compaction (once per window)", () => {
     const { o, at } = meter();
