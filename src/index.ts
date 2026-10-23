@@ -11,13 +11,10 @@ import { loadConfig, type Config } from "./config.ts";
 import { evaluateGate, projectCut, type GateVerdict } from "./gate.ts";
 import {
   HISTORY_DESCRIPTION,
-  HISTORY_GUIDELINES,
   HISTORY_SNIPPET,
   NEW_CONTEXT_DESCRIPTION,
-  NEW_CONTEXT_GUIDELINES,
   NEW_CONTEXT_SNIPPET,
   NOTES_DESCRIPTION,
-  NOTES_GUIDELINES,
   NOTES_SNIPPET,
   SYSTEM_PROMPT_SECTION,
 } from "./guidance.ts";
@@ -56,7 +53,7 @@ const HistoryParams = Type.Object({
 });
 
 const NewContextParams = Type.Object({
-  userRequested: Type.Optional(Type.Boolean({ description: "Set true only when the user explicitly asks for a fresh context window. Skips reclaim and pressure thresholds, not notebook or freshness checks. Defaults to false." })),
+  userRequested: Type.Optional(Type.Boolean({ description: "True only when the user explicitly asked for a fresh window; never for a rollover you decided on. Skips the reclaim and pressure thresholds; notebook checks still apply. Default false." })),
 });
 const MAINTENANCE_CUSTOM_TYPE = "note-context/maintenance";
 /** Custom type of the per-request status message written by versions ≤ 0.3; filtered out of context, never written. */
@@ -196,7 +193,6 @@ export default function noteContext(pi: ExtensionAPI): void {
     label: "Notes",
     description: NOTES_DESCRIPTION,
     promptSnippet: NOTES_SNIPPET,
-    promptGuidelines: NOTES_GUIDELINES,
     parameters: NotesParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const current = notebookOf(ctx);
@@ -255,7 +251,6 @@ export default function noteContext(pi: ExtensionAPI): void {
     label: "History",
     description: HISTORY_DESCRIPTION,
     promptSnippet: HISTORY_SNIPPET,
-    promptGuidelines: HISTORY_GUIDELINES,
     parameters: HistoryParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const branch = branchOf(ctx);
@@ -289,7 +284,6 @@ export default function noteContext(pi: ExtensionAPI): void {
     label: "New Context",
     description: NEW_CONTEXT_DESCRIPTION,
     promptSnippet: NEW_CONTEXT_SNIPPET,
-    promptGuidelines: NEW_CONTEXT_GUIDELINES,
     parameters: NewContextParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const reason = params.userRequested === true ? "user" : "model";
