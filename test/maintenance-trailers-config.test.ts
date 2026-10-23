@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { DEFAULT_CONFIG, parseConfig } from "../src/config.ts";
-import { step, zoneFor, type MaintenanceState } from "../src/maintenance.ts";
-import { appendSuffixPatch, formatTokens, renderStatusLine, StatusOdometer, tokensSinceReview } from "../src/status.ts";
+import { maintenanceRequestText, reminderText, step, zoneFor, type MaintenanceState } from "../src/maintenance.ts";
+import { appendSuffixPatch, renderStatusLine, StatusOdometer, tokensSinceReview } from "../src/status.ts";
 import { addTrailers, buildIdIndex } from "../src/trailers.ts";
 import { assistant, notebookEntry, toolResult, user } from "./fixtures.ts";
-import { EMPTY_NOTEBOOK } from "../src/notebook.ts";
+import { EMPTY_NOTEBOOK, type Notebook } from "../src/notebook.ts";
 
 describe("maintenance state machine", () => {
   const T = { contextWindow: 200_000, fallbackWindow: 200_000, reserveTokens: 16_384, leadTokens: 24_000, fallbackBufferTokens: 12_000 };
@@ -116,52 +116,93 @@ describe("trailers", () => {
   });
 });
 
+/** Any context-size figure: 12K, 1.5M, 400000, "tokens", "budget", "window" sizes. */
+const SIZE_FIGURE = /\d+(\.\d+)?\s*[KkMm]\b|\d{4,}|\btokens?\b|\bbudget\b|\d+\s*%/;
+
 describe("status line", () => {
   const nb = { revision: 2, sections: { Task: "t" }, reviewedThrough: "a1", reviewedTokens: 90_000, entryId: "n1" };
-  test("renders facts only: pressure and tokens since review", () => {
-    const line = renderStatusLine({ usage: { tokens: 142_300, contextWindow: 272_000 }, notebook: nb, tokensSinceReview: tokensSinceReview(142_300, nb) });
-    expect(line).toBe("[note-context] 142K/272K · notes rev 2, +52K since review");
-    const empty = renderStatusLine({ usage: { tokens: null, contextWindow: 200_000 }, notebook: EMPTY_NOTEBOOK, tokensSinceReview: null, branchChanged: true });
-    expect(empty).toBe("[note-context] ?/200K · no notes yet · branch changed — verify workspace state");
+  test("renders notes staleness only, with no context-size figures", () => {
+    const fresh = renderStatusLine({ notebook: nb, stale: false });
+    expect(fresh).toBe("[note-context] notes rev 2");
+    const stale = renderStatusLine({ notebook: nb, stale: true, externalCompaction: true });
+    expect(stale).toBe("[note-context] notes rev 2 not reviewed for a while — update them, or call notes({reviewed:true}) if they are still accurate · compaction: external");
+    const empty = renderStatusLine({ notebook: EMPTY_NOTEBOOK, stale: true, branchChanged: true });
+    expect(empty).toBe("[note-context] no notes yet — write them once there is working state worth keeping · branch changed — verify workspace state");
+    for (const line of [fresh, stale, empty]) expect(line).not.toMatch(SIZE_FIGURE);
   });
-  test("names the budget scale on large windows; staleness unknown for pre-field records", () => {
-    const legacy = { ...nb, reviewedTokens: null };
-    const line = renderStatusLine({ usage: { tokens: 142_300, contextWindow: 400_000, physicalWindow: 1_000_000 }, notebook: legacy, tokensSinceReview: tokensSinceReview(142_300, legacy) });
-    expect(line).toBe("[note-context] 142K/400K budget (1M window) · notes rev 2");
+  test("tokensSinceReview: whole context with no notes; unknown for pre-field records", () => {
+    expect(tokensSinceReview(142_300, nb)).toBe(52_300);
+    expect(tokensSinceReview(142_300, EMPTY_NOTEBOOK)).toBe(142_300);
+    expect(tokensSinceReview(142_300, { ...nb, reviewedTokens: null })).toBeNull();
+    expect(tokensSinceReview(null, nb)).toBeNull();
   });
-  test("odometer: first reading, then only on a pressure step or a staleness step; notes write re-arms staleness", () => {
-    const step = 40_000;
+
+  const step = 40_000;
+  const meter = () => {
     const o = new StatusOdometer();
-    const at = (tokens: number, book = nb) => {
-      const since = tokensSinceReview(tokens, book);
-      const show = o.shouldShow(step, tokens, since, book);
-      if (show) o.confirm(step, tokens, since, book);
-      return show;
+    return {
+      o,
+      at(tokens: number | null, book: Notebook = nb, external = false) {
+        const r = o.reading(step, tokensSinceReview(tokens, book), book, external);
+        if (r) o.confirm(r, book);
+        return r && renderStatusLine({ notebook: book, stale: r.stale, branchChanged: r.branchChanged, externalCompaction: r.externalCompaction });
+      },
     };
-    expect(at(95_000)).toBe(true); // first reading
-    expect(at(110_000)).toBe(false); // same pressure step (2), since=20K < step
-    expect(at(125_000)).toBe(true); // pressure step 2 → 3
-    expect(at(131_000)).toBe(true); // since=41K crosses one step
-    expect(at(150_000)).toBe(false); // step 3, since-step 1 already shown for this revision
-    const written = { ...nb, revision: 3, reviewedTokens: 150_000, entryId: "n2" };
-    expect(at(155_000, written)).toBe(false); // fresh notes, no pressure step change
-    expect(at(191_000, written)).toBe(true); // pressure step 3 → 4 (since=41K would also fire)
-    expect(at(120_000, written)).toBe(true); // pressure fell a step: shown (both directions)
+  };
+  test("usage crossing a step alone does not show it; staleness does", () => {
+    const { at } = meter();
+    expect(at(95_000)).toBeUndefined(); // notes reviewed at 90K: fresh, whatever the overall usage
+    expect(at(121_000)).toBeUndefined(); // usage step 2 → 3, since = 31K: still fresh
+    expect(at(129_000)).toBeUndefined();
+    const line = at(131_000); // since = 41K crosses one staleness step
+    expect(line).toContain("not reviewed for a while");
+    expect(line).not.toMatch(SIZE_FIGURE);
+    expect(at(165_000)).toBeUndefined(); // usage step 4, same staleness step
+    expect(at(171_000)).toContain("not reviewed for a while"); // since = 81K: second step
+    const written = { ...nb, revision: 3, reviewedTokens: 171_000, entryId: "n2" };
+    expect(at(175_000, written)).toBeUndefined(); // a write re-arms; fresh notes stay quiet
+    expect(at(205_000, written)).toBeUndefined(); // usage step 5, since 34K
+    expect(at(120_000, written)).toBeUndefined(); // usage fell a step: not a trigger any more
+    expect(at(212_000, written)).toContain("notes rev 3 not reviewed");
+  });
+  test("no notes yet: shown once, then once per further step", () => {
+    const { at } = meter();
+    expect(at(15_000, EMPTY_NOTEBOOK)).toContain("no notes yet");
+    expect(at(30_000, EMPTY_NOTEBOOK)).toBeUndefined();
+    expect(at(41_000, EMPTY_NOTEBOOK)).toContain("no notes yet");
+    expect(at(null, EMPTY_NOTEBOOK)).toBeUndefined(); // already nudged for this (absent) notebook
+    const m2 = meter();
+    expect(m2.at(null, EMPTY_NOTEBOOK)).toContain("no notes yet"); // usage unknown: still one nudge
+  });
+  test("one-shot facts: branch change and external compaction (once per window)", () => {
+    const { o, at } = meter();
+    expect(at(95_000, nb, true)).toBe("[note-context] notes rev 2 · compaction: external");
+    expect(at(96_000, nb, true)).toBeUndefined();
     o.force();
-    expect(at(120_000, written)).toBe(true); // forced (branch change) shows regardless
-    expect(at(120_000, written)).toBe(false);
+    expect(at(97_000, nb, true)).toBe("[note-context] notes rev 2 · branch changed — verify workspace state");
+    expect(at(97_000, nb, true)).toBeUndefined();
+    o.reset(); // new window
+    expect(at(97_000, nb, true)).toBe("[note-context] notes rev 2 · compaction: external");
+  });
+  test("pre-field notebook records (unknown reviewedTokens) never go stale on tokens", () => {
+    const { at } = meter();
+    const legacy = { ...nb, reviewedTokens: null };
+    expect(at(95_000, legacy)).toBeUndefined();
+    expect(at(395_000, legacy)).toBeUndefined();
+  });
+  test("reminder and maintenance request carry no token counts", () => {
+    const withBook = reminderText("## Task\nt");
+    expect(withBook.split("\n\n")[0]).toBe("[note-context] A context-window rollover is due. Update notes against what will leave the window (current notebook below), or call notes({reviewed:true}) if they are already sufficient. Then call new_context.");
+    expect(withBook.split("\n\n")[0]).not.toMatch(SIZE_FIGURE);
+    expect(reminderText(null)).not.toMatch(SIZE_FIGURE);
+    expect(maintenanceRequestText(3)).not.toMatch(SIZE_FIGURE);
+    expect(maintenanceRequestText(3)).not.toContain("exhausted");
   });
   test("appendSuffixPatch lands on the last text part; none → undefined", () => {
     const patched = appendSuffixPatch([{ type: "text", text: "out" }, { type: "image", data: "x", mimeType: "image/png" }], "[s]");
     expect(patched?.content[0]).toEqual({ type: "text", text: "out\n\n[s]" });
     expect(patched?.content[1]).toEqual({ type: "image", data: "x", mimeType: "image/png" });
     expect(appendSuffixPatch([{ type: "image", data: "x", mimeType: "image/png" }], "[s]")).toBeUndefined();
-  });
-  test("formatTokens", () => {
-    expect(formatTokens(999)).toBe("999");
-    expect(formatTokens(9_500)).toBe("9.5K");
-    expect(formatTokens(142_300)).toBe("142K");
-    expect(formatTokens(1_000_000)).toBe("1M");
   });
 });
 

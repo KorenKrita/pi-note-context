@@ -473,7 +473,8 @@ describe("split thresholds: reminder budget vs. fallback budget", () => {
     await h.turnEnd();
     expect(h.sent.some((m) => m.customType === "note-context/maintenance")).toBe(false);
     const reminder = h.sent.find((m) => m.customType === "note-context/reminder") as { content?: string } | undefined;
-    expect(reminder?.content).toContain("~397K tokens before forced rollover"); // 800K − 16384 − 12000 − 375K
+    expect(reminder?.content).toContain("A context-window rollover is due.");
+    expect(reminder?.content).not.toMatch(/\d+K|tokens/); // no countdown: the host owns timing
     h.usage.tokens = 780_000;
     await h.turnEnd();
     expect(h.sent.some((m) => m.customType === "note-context/maintenance")).toBe(true);
@@ -538,5 +539,26 @@ describe("boundary rollover interop (review 2026-09-23)", () => {
     h.branch.push({ id: "cmpX", parentId: null, timestamp: new Date().toISOString(), type: "compaction", summary: "", firstKeptEntryId: "a10", tokensBefore: 0, details: { kind: ROLLOVER_DETAILS_KIND } } as SessionEntry);
     await h.emit("turn_start");
     expect((await h.ledgerRows()).filter((r) => r["kind"] === "rollover")).toHaveLength(1);
+  });
+});
+
+describe("status line on tool results: notes staleness only", () => {
+  const result = async (h: ReturnType<typeof harness>) => {
+    const [r] = await h.emit("tool_result", { toolName: "bash", isError: false, content: [{ type: "text", text: "out" }] });
+    return (r as { content?: { text: string }[] } | undefined)?.content?.[0]?.text;
+  };
+  test("overall usage never shows it; tokens since the last review do, without any figures", async () => {
+    const h = harness({ autoRollover: false, statusStepTokens: 40_000 });
+    h.usage.tokens = 100_000;
+    await h.notes({ sections: { Task: "parser", Next: "x" } }); // reviewed at 100K
+    for (const t of [101_000, 121_000, 139_000]) {
+      h.usage.tokens = t; // crosses usage steps 2 → 3 without going stale
+      expect(await result(h)).toBeUndefined();
+    }
+    h.usage.tokens = 141_000;
+    const line = await result(h);
+    expect(line).toContain("[note-context] notes rev 2 not reviewed for a while");
+    expect(line).not.toMatch(/\d+(\.\d+)?\s*[KkMm]\b|\d{4,}|\btokens?\b|\bbudget\b|\bwindow\b/);
+    expect(await result(h)).toBeUndefined(); // once per staleness step
   });
 });

@@ -20,7 +20,7 @@ import {
 } from "./guidance.ts";
 import { currentWindow, indexBranch, isRolloverDetails, list, read, renderList, renderRead, renderSearch, search } from "./history.ts";
 import { appendLedger, flushLedger } from "./ledger.ts";
-import { fallbackThreshold, maintenanceRequestText, reminderText, reminderThreshold, step, zoneFor, type MaintenanceState, type Thresholds } from "./maintenance.ts";
+import { maintenanceRequestText, reminderText, reminderThreshold, step, zoneFor, type MaintenanceState, type Thresholds } from "./maintenance.ts";
 import { applySections, makeRecord, NOTEBOOK_ENTRY_TYPE, reconstructNotebook, renderNotebook, type Notebook } from "./notebook.ts";
 import { estimateTokens as estimateText } from "./notebook.ts";
 import { droppedRange, indexUserMessages, makeDetails, pinUserMessages, renderRolloverSummary, type RolloverReason } from "./rollover.ts";
@@ -462,7 +462,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     reminderShownForWindow = null;
     maintenanceExhaustedForWindow = null;
     lastCompactionWasOurs = false;
-    statusOdometer.reset(); // new window: first reading always shows
+    statusOdometer.reset(); // new window: re-arm staleness and one-shot facts
   }
 
   /**
@@ -708,10 +708,9 @@ export default function noteContext(pi: ExtensionAPI): void {
     }
     if (reminderShownForWindow === window) return;
     reminderShownForWindow = window;
-    const toThreshold = fallbackThreshold(t) - (usage?.tokens ?? 0);
     appendLedger({ kind: "reminder", session: sessionId(ctx), window, zone });
     pi.sendMessage(
-      { customType: "note-context/reminder", content: reminderText(toThreshold, notebook.revision > 0 ? renderNotebook(notebook.sections) : null), display: true },
+      { customType: "note-context/reminder", content: reminderText(notebook.revision > 0 ? renderNotebook(notebook.sections) : null), display: true },
       { deliverAs: "steer" },
     );
   });
@@ -751,29 +750,23 @@ export default function noteContext(pi: ExtensionAPI): void {
 
   // The status line is a suffix on a tool result, persisted with it, so every later
   // request replays it byte-for-byte (a trailing message that changes between requests
-  // breaks implicit prefix caching). Delivered when pressure crosses a step of
-  // `statusStepTokens`, when tokens added since the last notes review cross a step, on
-  // the first reading of a window, and once after /tree navigation. Own tool results
-  // and error results are never decorated.
+  // breaks implicit prefix caching). It is a notes-staleness nudge with no context-size
+  // figures: delivered when notes are missing or tokens added since the last notes review
+  // cross a step of `statusStepTokens`, once after /tree navigation, and once per window
+  // when compaction is external. Overall usage alone never triggers it; the host owns
+  // rollover timing. Own tool results and error results are never decorated.
   pi.on("tool_result", async (event, ctx) => {
     if (event.isError || OWN_TOOLS.has(event.toolName)) return undefined;
     const branch = branchOf(ctx);
     const notebook = reconstructNotebook(branch);
-    const physicalUsage = ctx.getContextUsage();
-    const tokens = physicalUsage?.tokens ?? null;
-    const since = tokensSinceReview(tokens, notebook);
+    const since = tokensSinceReview(ctx.getContextUsage()?.tokens ?? null, notebook);
     if (branchChangedPending) statusOdometer.force();
-    if (!statusOdometer.shouldShow(config.statusStepTokens, tokens, since, notebook)) return undefined;
-    const line = renderStatusLine({
-      usage: physicalUsage ? { tokens, contextWindow: budgetWindow(ctx), physicalWindow: physicalUsage.contextWindow } : undefined,
-      notebook,
-      tokensSinceReview: since,
-      branchChanged: branchChangedPending,
-      externalCompaction: externalOwner(ctx),
-    });
+    const reading = statusOdometer.reading(config.statusStepTokens, since, notebook, externalOwner(ctx));
+    if (!reading) return undefined;
+    const line = renderStatusLine({ notebook, stale: reading.stale, branchChanged: reading.branchChanged, externalCompaction: reading.externalCompaction });
     const patch = appendSuffixPatch(event.content, line);
     if (!patch) return undefined; // no text part to carry it: stay armed for the next result
-    statusOdometer.confirm(config.statusStepTokens, tokens, since, notebook);
+    statusOdometer.confirm(reading, notebook);
     branchChangedPending = false;
     return patch;
   });

@@ -1,6 +1,9 @@
 /**
- * Status line: one line of facts appended to a tool result, persisted with it.
- * DESIGN.md §4.1. No judgement words, no thresholds in the text.
+ * Status line: one line appended to a tool result, persisted with it.
+ * DESIGN.md §4.1. It is a notes-staleness nudge, not a context gauge: the host owns
+ * rollover timing, so the text carries no token, budget or window figures (per-result
+ * budget countdowns make current models anxious about context and make some of them
+ * misread genuine mid-turn user messages as injected text).
  *
  * Delivery is a suffix patch on the tool result (not a trailing message): a
  * trailing message that changes or disappears between requests breaks
@@ -11,95 +14,102 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { Notebook } from "./notebook.ts";
 
-export interface UsageLike {
-  tokens: number | null;
-  /** Scale pressure is read against (min(physical, budget)). */
-  contextWindow: number;
-  /** Physical window when it differs from the budget scale. */
-  physicalWindow?: number;
-}
-
 export interface StatusInput {
-  usage: UsageLike | undefined;
   notebook: Notebook;
-  /** Tokens added to the context since the notebook was last written/reviewed; null when unknown. */
-  tokensSinceReview: number | null;
+  /** Notes are stale: none yet, or not written/reviewed for at least one staleness step. */
+  stale: boolean;
   /** Set for one reading after /tree navigation. */
   branchChanged?: boolean;
-  /** Set when compaction for the current model is owned by another extension. */
+  /** Set (once per window) when compaction for the current model is owned by another extension. */
   externalCompaction?: boolean;
-}
-
-export function formatTokens(n: number): string {
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${trimZero((n / 1000).toFixed(n < 10_000 ? 1 : 0))}K`;
-  return `${trimZero((n / 1_000_000).toFixed(1))}M`;
-}
-
-function trimZero(s: string): string {
-  return s.replace(/\.0$/, "");
 }
 
 export function renderStatusLine(s: StatusInput): string {
   const parts: string[] = [];
-  if (s.usage && s.usage.contextWindow > 0) {
-    const scale = s.usage.physicalWindow && s.usage.physicalWindow !== s.usage.contextWindow ? ` budget (${formatTokens(s.usage.physicalWindow)} window)` : "";
-    parts.push(`${s.usage.tokens === null ? "?" : formatTokens(s.usage.tokens)}/${formatTokens(s.usage.contextWindow)}${scale}`);
-  }
-  if (s.notebook.revision === 0) {
-    parts.push("no notes yet");
-  } else {
-    const age = s.tokensSinceReview === null ? "" : `, +${formatTokens(Math.max(0, s.tokensSinceReview))} since review`;
-    parts.push(`notes rev ${s.notebook.revision}${age}`);
-  }
+  if (s.notebook.revision === 0) parts.push("no notes yet — write them once there is working state worth keeping");
+  else if (s.stale) parts.push(`notes rev ${s.notebook.revision} not reviewed for a while — update them, or call notes({reviewed:true}) if they are still accurate`);
+  else parts.push(`notes rev ${s.notebook.revision}`);
   if (s.externalCompaction) parts.push("compaction: external");
   if (s.branchChanged) parts.push("branch changed — verify workspace state");
   return `[note-context] ${parts.join(" · ")}`;
 }
 
-/** Tokens added since the notebook's review marker; null when either side is unknown. */
+/**
+ * Tokens added since the notebook's review marker; null when unknown. With no notebook yet
+ * everything in the window is unreviewed, so it is the whole context.
+ */
 export function tokensSinceReview(usageTokens: number | null | undefined, notebook: Notebook): number | null {
-  if (notebook.revision === 0 || notebook.reviewedTokens === null || usageTokens == null) return null;
+  if (usageTokens == null) return null;
+  if (notebook.revision === 0) return usageTokens;
+  if (notebook.reviewedTokens === null) return null;
   return usageTokens - notebook.reviewedTokens;
 }
 
+/** Notes are stale when there are none, or when at least one step of tokens was added since the last write/review. */
+export function isStale(step: number, sinceReview: number | null, notebook: Notebook): boolean {
+  if (notebook.revision === 0) return true;
+  return step > 0 && sinceReview !== null && sinceReview >= step;
+}
+
+export interface StatusReading {
+  stale: boolean;
+  branchChanged: boolean;
+  externalCompaction: boolean;
+  /** Staleness step this reading delivers, recorded on confirm. */
+  staleStep: number | null;
+}
+
 /**
- * Decides when a reading is delivered. Two independent ticks share one step size:
- *  - pressure: `floor(tokens / step)` differs from the last delivered reading (either direction);
- *  - staleness: `floor(tokensSinceReview / step)` ≥ 1 and differs from the last delivered
- *    reading for the same notebook revision (a write or review resets it).
- * The first reading after construction/reset and a forced reading always deliver.
+ * Decides when a reading is delivered. Overall context usage is not a trigger; only:
+ *  - staleness: `floor(tokensSinceReview / step)` reaches a value not yet delivered for the
+ *    current notebook record (≥ 1 with notes; ≥ 0 with no notes, so "no notes yet" shows
+ *    once and then once per further step). A notes write or review is a new record and re-arms it;
+ *  - one-shot facts: the reading after /tree navigation (`force`), and `compaction: external`
+ *    once per window.
+ * A notebook record with unknown `reviewedTokens` (written by an older version) never goes stale here.
  */
 export class StatusOdometer {
-  private lastPressureStep: number | null = null;
   private lastStale: { entryId: string | null; step: number } | null = null;
+  private externalShown = false;
   private forced = false;
 
   force(): void {
     this.forced = true;
   }
 
+  /** New window or session: re-arm every tick. */
   reset(): void {
-    this.lastPressureStep = null;
     this.lastStale = null;
+    this.externalShown = false;
     this.forced = false;
   }
 
-  shouldShow(step: number, tokens: number | null, sinceReview: number | null, notebook: Notebook): boolean {
-    if (this.forced || this.lastPressureStep === null) return true;
-    if (step <= 0) return false;
-    if (tokens !== null && Math.floor(tokens / step) !== this.lastPressureStep) return true;
-    if (sinceReview !== null) {
-      const s = Math.floor(sinceReview / step);
-      if (s >= 1 && (this.lastStale === null || this.lastStale.entryId !== notebook.entryId || this.lastStale.step !== s)) return true;
+  /** The reading to deliver now, or undefined when nothing is due. */
+  reading(step: number, sinceReview: number | null, notebook: Notebook, externalCompaction: boolean): StatusReading | undefined {
+    const stale = isStale(step, sinceReview, notebook);
+    let staleStep: number | null = null;
+    let staleDue = false;
+    if (step > 0 && sinceReview !== null) {
+      const s = Math.max(0, Math.floor(sinceReview / step));
+      const min = notebook.revision === 0 ? 0 : 1;
+      if (s >= min) {
+        staleStep = s;
+        staleDue = this.lastStale === null || this.lastStale.entryId !== notebook.entryId || this.lastStale.step !== s;
+      }
+    } else if (notebook.revision === 0 && (this.lastStale === null || this.lastStale.entryId !== notebook.entryId)) {
+      // No notes and usage unknown: still nudge once.
+      staleStep = 0;
+      staleDue = true;
     }
-    return false;
+    const externalDue = externalCompaction && !this.externalShown;
+    if (!this.forced && !staleDue && !externalDue) return undefined;
+    return { stale, branchChanged: this.forced, externalCompaction: externalDue, staleStep: staleDue ? staleStep : null };
   }
 
-  confirm(step: number, tokens: number | null, sinceReview: number | null, notebook: Notebook): void {
-    this.forced = false;
-    this.lastPressureStep = tokens !== null && step > 0 ? Math.floor(tokens / step) : (this.lastPressureStep ?? 0);
-    if (sinceReview !== null && step > 0) this.lastStale = { entryId: notebook.entryId, step: Math.floor(sinceReview / step) };
+  confirm(reading: StatusReading, notebook: Notebook): void {
+    if (reading.branchChanged) this.forced = false;
+    if (reading.externalCompaction) this.externalShown = true;
+    if (reading.staleStep !== null) this.lastStale = { entryId: notebook.entryId, step: reading.staleStep };
   }
 }
 

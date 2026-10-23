@@ -37,13 +37,14 @@ export function zoneFor(tokens: number | null, t: Thresholds): PressureZone {
   return "normal";
 }
 
-export function reminderText(tokensToThreshold: number, notebookText: string | null): string {
-  const head = `[note-context] ~${Math.max(1, Math.round(tokensToThreshold / 1000))}K tokens before forced rollover. Update notes against what will leave the window${notebookText ? " (current notebook below)" : ""}, or call notes({reviewed:true}) if they are already sufficient. Then call new_context.`;
+/** No token counts: the host owns rollover timing; the model only needs the action. */
+export function reminderText(notebookText: string | null): string {
+  const head = `[note-context] A context-window rollover is due. Update notes against what will leave the window${notebookText ? " (current notebook below)" : ""}, or call notes({reviewed:true}) if they are already sufficient. Then call new_context.`;
   return notebookText ? `${head}\n\n${notebookText}` : head;
 }
 
 export function maintenanceRequestText(attempt: number, repairError?: string): string {
-  const base = `[note-context maintenance #${attempt}] Context is nearly exhausted. Make one notes write (or notes({reviewed:true})) now; the host will start a new window as soon as it lands. Do not call other tools.`;
+  const base = `[note-context maintenance #${attempt}] The host needs a notes checkpoint before it starts a new window. Make one notes write (or notes({reviewed:true})) now; the host will start a new window as soon as it lands. Do not call other tools.`;
   return repairError ? `${base}\nThe previous notes call failed: ${repairError}` : base;
 }
 
