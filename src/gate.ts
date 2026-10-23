@@ -99,7 +99,7 @@ export function evaluateGate(input: GateInput): GateVerdict {
       reason,
       blocker: "low_reclaim",
       reclaimTokens: reclaim,
-      message: `rollover would reclaim ~${Math.max(0, Math.round(reclaim / 1000))}K tokens; below the ${Math.round(input.minReclaimTokens / 1000)}K threshold — continue working.`,
+      message: "too little would leave the window for a rollover to help — continue working.",
     };
   }
   return { ok: true, reason, firstKeptEntryId, reclaimTokens: reclaim, droppedEntries: firstKeptIndex - start };

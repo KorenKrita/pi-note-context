@@ -308,8 +308,8 @@ describe("user-requested rollover", () => {
     const h = harness({ minReclaimTokens: 40_000 });
     h.usage.tokens = 84_000; // below the host pressure floor
     await h.notes({ sections: { Task: "parser", Next: "x" } });
-    await expect(h.newContext()).rejects.toThrow(/below the 40K threshold/);
-    await expect(h.newContext({ userRequested: false })).rejects.toThrow(/below the 40K threshold/);
+    await expect(h.newContext()).rejects.toThrow(/too little would leave the window/);
+    await expect(h.newContext({ userRequested: false })).rejects.toThrow(/too little would leave the window/);
     expect(await h.newContext({ userRequested: true })).toContain("rollover scheduled");
     await h.settle();
     expect(h.compactions()).toBe(1);

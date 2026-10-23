@@ -318,7 +318,7 @@ export default function noteContext(pi: ExtensionAPI): void {
       pendingRollover = { reason: verdict.reason, requestedAtLeaf: ctx.sessionManager.getLeafId() };
       if (external) return text(`rollover scheduled (external compaction owner for ${modelKey(ctx)}): window #${window} → #${window + 1} at the end of this turn. End the turn now without further tool calls.`, { external: true, reason: verdict.reason });
       return text(
-        `rollover scheduled${confirmingHost ? " (confirms the host schedule)" : ""}: window #${window} → #${window + 1} at the end of this turn (~${Math.round(verdict.reclaimTokens / 1000)}K tokens reclaimed, ${verdict.droppedEntries} entries leave the window). End the turn now without further tool calls.`,
+        `rollover scheduled${confirmingHost ? " (confirms the host schedule)" : ""}: window #${window} → #${window + 1} at the end of this turn (${verdict.droppedEntries} entries leave the window). End the turn now without further tool calls.`,
         { reason: verdict.reason, reclaimTokens: verdict.reclaimTokens, droppedEntries: verdict.droppedEntries, confirmedHost: confirmingHost },
       );
     },
@@ -357,7 +357,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     }
     pendingRollover = { reason: "host", requestedAtLeaf: ctx.sessionManager.getLeafId() };
     appendLedger({ kind: "gate", session: sessionId(ctx), window, reason: verdict.reason, ok: true, reclaim: verdict.reclaimTokens, auto: true });
-    return `\nRollover scheduled by the host: window #${window} → #${window + 1} at the end of this turn (~${Math.round(verdict.reclaimTokens / 1000)}K tokens reclaimed). Finish what this turn needs; the new window opens with these notes.`;
+    return `\nRollover scheduled by the host: window #${window} → #${window + 1} at the end of this turn. Finish what this turn needs; the new window opens with these notes.`;
   }
 
   function onNotesLanded(ctx: ExtensionContext, revision: number): void {
