@@ -25,8 +25,10 @@ export interface Config {
   budgetTokens: number;
   /** Forced fallback is measured against min(contextWindow, fallbackBudgetTokens); defaults to budgetTokens. */
   fallbackBudgetTokens: number;
-  /** Status-line step: a reading is delivered when pressure or tokens-since-review cross a multiple of this. */
+  /** Staleness step: a reading is delivered when tokens since the last notes write/review cross a multiple of this. */
   statusStepTokens: number;
+  /** Step for the "no notes yet" nudge, measured on context size; defaults to statusStepTokens. */
+  noNotesStepTokens: number;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -43,6 +45,7 @@ export const DEFAULT_CONFIG: Config = {
   budgetTokens: 400_000,
   fallbackBudgetTokens: 400_000,
   statusStepTokens: 40_000,
+  noNotesStepTokens: 40_000,
 };
 
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
@@ -79,6 +82,7 @@ export function parseConfig(raw: unknown): Config {
     budgetTokens,
     fallbackBudgetTokens: num(r["fallbackBudgetTokens"], budgetTokens, 32_000),
     statusStepTokens: num(r["statusStepTokens"], DEFAULT_CONFIG.statusStepTokens, 1_000),
+    noNotesStepTokens: num(r["noNotesStepTokens"], num(r["statusStepTokens"], DEFAULT_CONFIG.statusStepTokens, 1_000), 1_000),
   };
 }
 

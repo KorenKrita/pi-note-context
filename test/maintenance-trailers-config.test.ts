@@ -246,6 +246,8 @@ describe("config", () => {
     // fallbackBudgetTokens follows budgetTokens unless set; both share the 32K minimum.
     expect(parseConfig({ budgetTokens: 300_000 }).fallbackBudgetTokens).toBe(300_000);
     expect(parseConfig({ budgetTokens: 400_000, fallbackBudgetTokens: 800_000 }).fallbackBudgetTokens).toBe(800_000);
+    expect(parseConfig({ statusStepTokens: 100_000 }).noNotesStepTokens).toBe(100_000);
+    expect(parseConfig({ statusStepTokens: 100_000, noNotesStepTokens: 200_000 }).noNotesStepTokens).toBe(200_000);
     expect(parseConfig({ budgetTokens: 400_000, fallbackBudgetTokens: 1_000 }).fallbackBudgetTokens).toBe(400_000);
     expect(DEFAULT_CONFIG.pin.indexMaxTokens).toBe(3072);
     expect(parseConfig({ sessionIndexMaxTokens: 1_000 }).pin.indexMaxTokens).toBe(1_000);

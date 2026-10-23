@@ -766,7 +766,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     const reviewedEarlier = at >= 0 && branch.slice(at + 1).some((e) => e.type === "compaction");
     const since = tokensSinceReview(usage, notebook, reviewedEarlier ? base : null);
     if (branchChangedPending) statusOdometer.force();
-    const reading = statusOdometer.reading(config.statusStepTokens, since, notebook, externalOwner(ctx));
+    const reading = statusOdometer.reading(notebook.revision === 0 ? config.noNotesStepTokens : config.statusStepTokens, since, notebook, externalOwner(ctx));
     if (!reading) return undefined;
     const line = renderStatusLine({ notebook, stale: reading.stale, branchChanged: reading.branchChanged, externalCompaction: reading.externalCompaction });
     const patch = appendSuffixPatch(event.content, line);

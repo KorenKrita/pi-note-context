@@ -43,7 +43,8 @@ Optional `~/.pi/agent/pi-note-context.json` (global only; every field optional):
   "autoRollover": true,
   "budgetTokens": 400000,
   "fallbackBudgetTokens": 400000,
-  "statusStepTokens": 40000
+  "statusStepTokens": 40000,
+  "noNotesStepTokens": 40000
 }
 ```
 
@@ -51,7 +52,7 @@ Optional `~/.pi/agent/pi-note-context.json` (global only; every field optional):
 
 `fallbackBudgetTokens` (default: same as `budgetTokens`): the forced fallback (checkpoint request, tool guard, host compaction) is measured against `min(contextWindow, fallbackBudgetTokens)` and starts at `fallbackBudget − reserveTokens − fallbackBufferTokens`. Set it above `budgetTokens` to remind early but force late, e.g. `400000` / `800000` → reminder from ~360K, forced from ~772K on a 1M window.
 
-`statusStepTokens` (default 40K): staleness step for the status line. The line is appended to a tool result (and persisted with it, so provider prompt caches keep hitting) when there are no notes yet and the context has grown by a multiple of this (a short task is never nudged), or when tokens added since the last notes write/review cross a multiple of this — not on every call, and never merely because overall context usage grew. It also carries the one-shot facts `branch changed — verify workspace state` (after `/tree`) and `compaction: external` (once per window). It contains no token, budget or window figures: per-result budget countdowns make current models anxious about context (suggesting new sessions, trimming their own work) and make some misread genuine mid-turn user messages as prompt injection. Shape: `[note-context] notes rev 7 not reviewed for a while — update them, or call notes({reviewed:true}) if they are still accurate`.
+`statusStepTokens` (default 40K): staleness step for the status line. The line is appended to a tool result (and persisted with it, so provider prompt caches keep hitting) when there are no notes yet and the context has grown by a multiple of `noNotesStepTokens` (defaults to `statusStepTokens`; a short task is never nudged), or when tokens added since the last notes write/review cross a multiple of this — not on every call, and never merely because overall context usage grew. It also carries the one-shot facts `branch changed — verify workspace state` (after `/tree`) and `compaction: external` (once per window). It contains no token, budget or window figures: per-result budget countdowns make current models anxious about context (suggesting new sessions, trimming their own work) and make some misread genuine mid-turn user messages as prompt injection. Shape: `[note-context] notes rev 7 not reviewed for a while — update them, or call notes({reviewed:true}) if they are still accurate`.
 
 The one-per-window reminder (from the reminder threshold) likewise carries no countdown: `[note-context] A context-window rollover is due. Update notes against what will leave the window (current notebook below), or call notes({reviewed:true}) if they are already sufficient. Then call new_context.`
 
