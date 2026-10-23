@@ -36,13 +36,15 @@ export function renderStatusLine(s: StatusInput): string {
 
 /**
  * Tokens added since the notebook's review marker; null when unknown. With no notebook yet
- * everything in the window is unreviewed, so it is the whole context.
+ * everything in the window is unreviewed, so it is the whole context. `windowBase` is the
+ * first known usage of the current window, passed when the notes were reviewed in an earlier
+ * window: usage restarts after a rollover, so the old window's marker cannot be subtracted.
  */
-export function tokensSinceReview(usageTokens: number | null | undefined, notebook: Notebook): number | null {
+export function tokensSinceReview(usageTokens: number | null | undefined, notebook: Notebook, windowBase: number | null = null): number | null {
   if (usageTokens == null) return null;
   if (notebook.revision === 0) return usageTokens;
   if (notebook.reviewedTokens === null) return null;
-  return usageTokens - notebook.reviewedTokens;
+  return usageTokens - (windowBase ?? notebook.reviewedTokens);
 }
 
 /** Notes are stale when there are none, or when at least one step of tokens was added since the last write/review. */
@@ -61,7 +63,7 @@ export interface StatusReading {
 
 /**
  * Decides when a reading is delivered. Overall context usage is not a trigger; only:
- *  - staleness: `floor(tokensSinceReview / step)` reaches a value not yet delivered for the
+ *  - staleness: `floor(tokensSinceReview / step)` rises above the highest value delivered for the
  *    current notebook record (≥ 1 with notes; ≥ 0 with no notes, so "no notes yet" shows
  *    once and then once per further step). A notes write or review is a new record and re-arms it;
  *  - one-shot facts: the reading after /tree navigation (`force`), and `compaction: external`
@@ -72,6 +74,7 @@ export class StatusOdometer {
   private lastStale: { entryId: string | null; step: number } | null = null;
   private externalShown = false;
   private forced = false;
+  private base: number | null = null;
 
   force(): void {
     this.forced = true;
@@ -82,6 +85,13 @@ export class StatusOdometer {
     this.lastStale = null;
     this.externalShown = false;
     this.forced = false;
+    this.base = null;
+  }
+
+  /** First known usage since the last reset; the staleness origin for notes reviewed in an earlier window. */
+  windowBase(usageTokens: number | null): number | null {
+    if (this.base === null && usageTokens !== null) this.base = usageTokens;
+    return this.base;
   }
 
   /** The reading to deliver now, or undefined when nothing is due. */
@@ -94,7 +104,7 @@ export class StatusOdometer {
       const min = notebook.revision === 0 ? 0 : 1;
       if (s >= min) {
         staleStep = s;
-        staleDue = this.lastStale === null || this.lastStale.entryId !== notebook.entryId || this.lastStale.step !== s;
+        staleDue = this.lastStale === null || this.lastStale.entryId !== notebook.entryId || this.lastStale.step < s;
       }
     } else if (notebook.revision === 0 && (this.lastStale === null || this.lastStale.entryId !== notebook.entryId)) {
       // No notes and usage unknown: still nudge once.

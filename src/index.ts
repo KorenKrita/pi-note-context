@@ -759,7 +759,12 @@ export default function noteContext(pi: ExtensionAPI): void {
     if (event.isError || OWN_TOOLS.has(event.toolName)) return undefined;
     const branch = branchOf(ctx);
     const notebook = reconstructNotebook(branch);
-    const since = tokensSinceReview(ctx.getContextUsage()?.tokens ?? null, notebook);
+    const usage = ctx.getContextUsage()?.tokens ?? null;
+    const base = statusOdometer.windowBase(usage);
+    // Notes reviewed before the latest compaction belong to an earlier window: count from this window's start.
+    const at = notebook.entryId === null ? -1 : branch.findIndex((e) => e.id === notebook.entryId);
+    const reviewedEarlier = at >= 0 && branch.slice(at + 1).some((e) => e.type === "compaction");
+    const since = tokensSinceReview(usage, notebook, reviewedEarlier ? base : null);
     if (branchChangedPending) statusOdometer.force();
     const reading = statusOdometer.reading(config.statusStepTokens, since, notebook, externalOwner(ctx));
     if (!reading) return undefined;

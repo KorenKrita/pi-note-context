@@ -561,4 +561,17 @@ describe("status line on tool results: notes staleness only", () => {
     expect(line).not.toMatch(/\d+(\.\d+)?\s*[KkMm]\b|\d{4,}|\btokens?\b|\bbudget\b|\bwindow\b/);
     expect(await result(h)).toBeUndefined(); // once per staleness step
   });
+  test("after a rollover, staleness counts from the new window's start", async () => {
+    const h = harness({ autoRollover: false, statusStepTokens: 40_000 });
+    h.usage.tokens = 360_000;
+    await h.notes({ sections: { Task: "parser", Next: "x" } }); // reviewed at 360K
+    expect(await h.newContext({ userRequested: true })).toContain("rollover scheduled");
+    await h.settle();
+    for (const t of [25_000, 45_000, 64_000]) {
+      h.usage.tokens = t;
+      expect(await result(h)).toBeUndefined();
+    }
+    h.usage.tokens = 66_000; // 41K into the new window
+    expect(await result(h)).toContain("not reviewed for a while");
+  });
 });

@@ -137,6 +137,33 @@ describe("status line", () => {
     expect(tokensSinceReview(null, nb)).toBeNull();
   });
 
+  test("tokensSinceReview: notes from an earlier window count from this window's base", () => {
+    expect(tokensSinceReview(65_000, { ...nb, reviewedTokens: 365_000 }, 25_000)).toBe(40_000);
+    expect(tokensSinceReview(65_000, { ...nb, reviewedTokens: null }, 25_000)).toBeNull();
+  });
+  test("after a rollover the staleness nudge returns once the new window grows by a step", () => {
+    const o = new StatusOdometer();
+    const old = { ...nb, reviewedTokens: 365_000 };
+    const shown: number[] = [];
+    o.reset();
+    for (const t of [null, 25_000, 45_000, 64_000, 66_000, 80_000, 106_000]) {
+      const r = o.reading(step, tokensSinceReview(t, old, o.windowBase(t)), old, false);
+      if (r) { o.confirm(r, old); if (t !== null) shown.push(t); }
+    }
+    expect(shown).toEqual([66_000, 106_000]);
+  });
+  test("usage falling back and rising again does not repeat a delivered step", () => {
+    const { at } = meter();
+    expect(at(131_000)).toContain("not reviewed");
+    expect(at(171_000)).toContain("not reviewed");
+    expect(at(165_000)).toBeUndefined();
+    expect(at(171_000)).toBeUndefined();
+    expect(at(15_000, EMPTY_NOTEBOOK)).toContain("no notes yet");
+    expect(at(41_000, EMPTY_NOTEBOOK)).toContain("no notes yet");
+    expect(at(39_000, EMPTY_NOTEBOOK)).toBeUndefined();
+    expect(at(41_000, EMPTY_NOTEBOOK)).toBeUndefined();
+  });
+
   const step = 40_000;
   const meter = () => {
     const o = new StatusOdometer();
