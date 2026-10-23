@@ -25,7 +25,7 @@ Call with no arguments to read. Pass \`sections\` (name → text) to replace exa
 Canonical sections: ${CANONICAL_SECTIONS.join(", ")}. Custom names allowed; at most ${MAX_SECTIONS} sections. One line per item; replace stale lines rather than appending.
 Limits: 16 KiB and ~4K tokens. An oversized write is rejected whole and the previous revision stands; prune and add in one call. The result reports revision and remaining capacity, not the text.`;
 
-export const HISTORY_DESCRIPTION = `Search or read earlier conversation in the current session only, including earlier context windows (everything that left the window at a rollover). Other sessions are not searched. Read-only.
+export const HISTORY_DESCRIPTION = `Search or read earlier conversation on the current branch of this session only, including earlier context windows (everything that left the window at a rollover). Other sessions and other /tree branches are not searched. Read-only.
 \`query\`: literal substring search → chronological hits with \`[history entry=ID]\` ids and snippets. \`id\`: read one entry with \`context\` neighbours on each side (default 1) so a tool result arrives with its call; long entries are paged with \`offset\`. \`list: true\`: chronological listing for discovery. \`window\` restricts any mode to one context window number.
 Indexed: user and assistant messages, tool results, shell runs, compaction summaries, notebook revisions. Not indexed: material excluded from model context, other extensions' private entries, and history results themselves.`;
 

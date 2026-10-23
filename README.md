@@ -18,7 +18,7 @@ Steps 1–3 of 4 shipped (see DESIGN.md §13) and independently reviewed twice (
 
 ## User-requested rollover
 
-When the user explicitly asks for a fresh window, update or review `notes`, wait for its result, then call `new_context({ userRequested: true })`. This bypasses `minReclaimTokens` and the host pressure floor (the reminder threshold), not notebook existence or freshness. It still refuses duplicate schedules and a window that fits entirely in the retained recent tail. The turn must end after scheduling.
+When the user explicitly asks for a fresh window, update or review `notes`, wait for its result, then call `new_context({ userRequested: true })`. This bypasses `minReclaimTokens`, not notebook existence or freshness (the host pressure floor never applies to model or user requests). It still refuses duplicate schedules and a window that fits entirely in the retained recent tail. The turn must end after scheduling.
 
 `new_context()` and `new_context({ userRequested: false })` keep the existing model-decided behavior; automatic host rollovers keep both economic thresholds. Do not use the flag merely because a model-decided rollover was refused. Accepted user requests carry `reason: "user"` through the gate ledger and, when this plugin owns compaction, the rollover summary/details and ledger. External compaction owners still supply their own summary. The flag is a model attestation of the user's request, not a separately authenticated permission.
 

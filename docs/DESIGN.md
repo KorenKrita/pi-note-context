@@ -53,7 +53,7 @@ Persistence: one `custom` journal entry (`note-context/notebook`) per write, car
 
 ### 3.2 `new_context`
 
-Optional argument: `{ userRequested?: boolean }` (default `false`). Calling it is an attestation that the current notebook revision is sufficient to continue. Use `userRequested: true` **only when the user explicitly asks for a fresh window**, never to override a refusal for a model-decided rollover. The host cannot authenticate intent from the Boolean; the tool description and guidance require the model to attest it. This request skips the economic reclaim/pressure thresholds, not the notebook or freshness checks. The host validates structural conditions and either schedules a rollover at the next safe boundary or returns a specific blocker:
+Optional argument: `{ userRequested?: boolean }` (default `false`). Calling it is an attestation that the current notebook revision is sufficient to continue. Use `userRequested: true` **only when the user explicitly asks for a fresh window**, never to override a refusal for a model-decided rollover. The host cannot authenticate intent from the Boolean; the tool description and guidance require the model to attest it. This request skips the minimum-reclaim threshold, not the notebook or freshness checks (the pressure floor applies only to host-initiated rollovers). The host validates structural conditions and either schedules a rollover at the next safe boundary or returns a specific blocker:
 
 | Check | Blocker text |
 |---|---|
