@@ -77,11 +77,13 @@ Read-back over the **model-visible** part of the current branch's journal, inclu
 
 | Call | Effect |
 |---|---|
-| `history({ query, window?, limit? })` | Literal substring search; returns bounded snippets with `[history entry=…]` ids, ordered chronologically. `window` restricts to a window number. |
+| `history({ query, window?, limit?, offset?, from?, includeActive? })` | Case-insensitive literal substring search; `query` is a string or an array (OR). Returns bounded snippets with `[history entry=…]` ids. Original content ranks before notebook revisions and compaction/branch summaries; each group is `from: "oldest"` (default) or `"newest"`. `window` restricts to a window number. |
 | `history({ id, context? })` | Read one entry in full plus `context` neighbouring entries on each side (default 1) so a tool result arrives with its call. |
 | `history({ list: true, window? })` | Chronological listing (role, first line, id) for discovery without a known substring. |
 
 Allowlist of indexed entry kinds: user messages, assistant messages (text and tool-call arguments), tool results, compaction summaries, branch summaries, this plugin's own notebook and rollover entries. Excluded: bash executions marked `excludeFromContext`, other extensions' custom entries, provider-opaque state, and `history`'s own results (to avoid recursive duplication).
+
+Search excludes entries whose full indexed text already appears in `buildSessionProjection()` and reports the skipped count; `includeActive: true` overrides this. This accounts for retained tails across windows and persisted context edits, while plain notebook records (not model-visible) remain searchable. Other extensions’ request-local context filters are not reflected in the canonical projection. Search `offset` counts filtered, ranked hits; all other options must stay unchanged across pages. Empty queries/arrays/array members are rejected; spaces and regex punctuation stay literal. Read-by-id and listing do not apply search ranking or active-context exclusion.
 
 Output is bounded by a character budget with pagination.
 

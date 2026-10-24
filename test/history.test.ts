@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { buildSessionProjection, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { ToolCall } from "@earendil-works/pi-ai";
-import { currentWindow, cutAt, indexBranch, list, read, renderRead, ROLLOVER_DETAILS_KIND, search } from "../src/history.ts";
+import { activeHistoryIds, currentWindow, cutAt, indexBranch, list, read, renderRead, renderSearch, ROLLOVER_DETAILS_KIND, search } from "../src/history.ts";
 import { NOTEBOOK_ENTRY_TYPE } from "../src/notebook.ts";
 
 const ts = "2026-09-10T00:00:00.000Z";
@@ -125,6 +125,66 @@ describe("queries", () => {
     expect(p.total).toBe(4);
     const w2 = list(items, { window: 2 });
     expect(w2.items.map((i) => i.id)).toEqual(["u2"]);
+  });
+});
+
+describe("search recall and ranking", () => {
+  test("case-insensitive OR is literal, reports repeated matches, and preserves Unicode offsets", () => {
+    const items = indexBranch([user("u1", "İ prefix JeV and jev"), user("u2", "ROLLOVER [x].*"), user("u3", "not xanything")]);
+    const r = search(items, { query: ["jev", "[x].*"] });
+    expect(r.hits.map((h) => h.id)).toEqual(["u1", "u2"]);
+    expect(r.hits[0]!.moreMatches).toBe(1);
+    expect(search(items, { query: "jev", snippetChars: 3 }).hits[0]!.snippet).toBe("…JeV…");
+    expect(search(items, { query: "prefix JeV" }).hits.map((h) => h.id)).toEqual(["u1"]);
+    expect(search(items, { query: "jev|rollover" }).hits).toEqual([]);
+    expect(search(items, { query: ["jev", "JEV"] }).hits[0]!.moreMatches).toBe(1);
+    for (const query of ["", [], ["Jev", ""]]) expect(() => search(items, { query })).toThrow("non-empty");
+  });
+
+  test("originals always precede revisions/summaries; direction, filtering and paging compose", () => {
+    const items = indexBranch([
+      custom("n1", NOTEBOOK_ENTRY_TYPE, { version: 1, revision: 1, sections: { Task: "needle" }, reviewedThrough: null }),
+      user("u1", "Needle"),
+      { ...rollover("r1"), summary: "needle" } as SessionEntry,
+      user("u2", "NEEDLE"),
+      { ...base("b1"), type: "branch_summary", summary: "needle", fromId: "u1" },
+      custom("n2", NOTEBOOK_ENTRY_TYPE, { version: 1, revision: 2, sections: { Task: "needle" }, reviewedThrough: null }),
+    ]);
+    expect(search(items, { query: "needle" }).hits.map((h) => h.id)).toEqual(["u1", "u2", "n1", "r1", "b1", "n2"]);
+    const opts = { query: "needle", from: "newest" as const, activeIds: new Set(["u2"]), limit: 2 };
+    const p1 = search(items, opts);
+    const p2 = search(items, { ...opts, offset: 2 });
+    const p3 = search(items, { ...opts, offset: 4 });
+    expect([...p1.hits, ...p2.hits, ...p3.hits].map((h) => h.id)).toEqual(["u1", "n2", "b1", "r1", "n1"]);
+    expect(p1.skippedActive).toBe(1);
+    expect(p1.truncated).toBe(true);
+    expect(p3.truncated).toBe(false);
+    expect(renderSearch(p1, opts)).toContain("offset: 2");
+    expect(renderSearch(p1, opts)).toContain("Skipped 1 matching entries already in your active context");
+    expect(search(items, { ...opts, window: 2 }).hits.map((h) => h.id)).toEqual(["n2", "b1"]);
+  });
+
+  test("Pi projection excludes retained visible originals, not notebook state or context-edited originals", () => {
+    const branch: SessionEntry[] = [
+      user("old", "needle dropped"),
+      user("kept", "needle retained"),
+      user("edited", "needle replaced"),
+      user("omitted", "needle hidden"),
+      custom("n1", NOTEBOOK_ENTRY_TYPE, { version: 1, revision: 1, sections: { Task: "needle" }, reviewedThrough: null }),
+      { ...rollover("r1"), firstKeptEntryId: "kept", summary: "needle summary" } as SessionEntry,
+      { ...base("e1"), type: "context_edit", targetId: "edited", replacement: { content: "placeholder" } },
+      { ...base("e2"), type: "context_edit", targetId: "omitted", replacement: null },
+      user("new", "needle current"),
+    ];
+    const linked = branch.map((entry, i) => ({ ...entry, parentId: i ? branch[i - 1]!.id : null }));
+    const activeIds = activeHistoryIds(buildSessionProjection(linked));
+    expect([...activeIds]).toEqual(["r1", "kept", "new"]);
+    const items = indexBranch(linked);
+    const r = search(items, { query: "needle", activeIds });
+    expect(r.hits.map((h) => h.id)).toEqual(["old", "edited", "omitted", "n1"]);
+    expect(r.skippedActive).toBe(3);
+    expect(read(items, "kept", 0)?.target.text).toBe("needle retained");
+    expect(list(items).items.map((i) => i.id)).toContain("kept");
   });
 });
 

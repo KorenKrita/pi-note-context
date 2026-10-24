@@ -9,7 +9,7 @@
  * provider-opaque state, and results of the `history` tool itself.
  */
 
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { SessionEntry, SessionProjection } from "@earendil-works/pi-coding-agent";
 import { isNotebookRecord, NOTEBOOK_ENTRY_TYPE, renderNotebook } from "./notebook.ts";
 
 export const ROLLOVER_DETAILS_KIND = "note-context/rollover";
@@ -99,6 +99,25 @@ function toItem(e: SessionEntry, window: number): HistoryItem | null {
   }
 }
 
+/** IDs whose full indexed text is already visible in Pi's canonical context projection.
+ * Plain notebook records and omitted/replaced context-edit targets are not assumed visible.
+ * Request-local transformations by other extensions are outside this projection.
+ */
+export function activeHistoryIds(projection: SessionProjection): Set<string> {
+  const ids = new Set<string>();
+  for (const { sourceEntry, messages } of projection.entries) {
+    const item = toItem(sourceEntry, 1);
+    if (!item || messages.length === 0) continue;
+    if (sourceEntry.type === "message") {
+      const visible = messages.map((message) => toItem({ ...sourceEntry, message }, 1)?.text ?? "").join("\n");
+      if (visible.includes(item.text)) ids.add(item.id);
+    } else if (sourceEntry.type === "compaction" || sourceEntry.type === "branch_summary") {
+      ids.add(item.id);
+    }
+  }
+  return ids;
+}
+
 function contentText(content: string | readonly { type: string; text?: string }[]): string {
   if (typeof content === "string") return content;
   return content.map((c) => (c.type === "text" ? (c.text ?? "") : `[${c.type}]`)).join("\n");
@@ -132,7 +151,12 @@ function fullJson(v: unknown): string {
 // ---------------------------------------------------------------------------
 
 export interface SearchOptions {
-  query: string;
+  /** A literal phrase, or an array of literal phrases matched with OR; case-insensitive. */
+  query: string | string[];
+  /** Direction within each priority group. Default oldest for backward compatibility. */
+  from?: "oldest" | "newest";
+  /** Internal projection-derived exclusion set; omitted when includeActive is true. */
+  activeIds?: ReadonlySet<string>;
   window?: number;
   limit?: number;
   /** Number of matching entries to skip (pagination). */
@@ -153,41 +177,44 @@ export interface SearchHit {
 export interface SearchResult {
   hits: SearchHit[];
   scanned: number;
+  skippedActive: number;
   truncated: boolean;
 }
 
 export function search(items: readonly HistoryItem[], opts: SearchOptions): SearchResult {
   const limit = opts.limit ?? 20;
   const snip = opts.snippetChars ?? 240;
-  const q = opts.query;
-  const hits: SearchHit[] = [];
+  const queries = typeof opts.query === "string" ? [opts.query] : opts.query;
+  if (queries.length === 0 || queries.some((q) => q.length === 0)) throw new Error("history: query must be a non-empty string or an array of non-empty strings.");
+  // Escape every alternative: OR is array syntax, never a regex or whitespace operator.
+  // Unicode case-insensitive matching keeps offsets in the original text (lowercasing can change its length).
+  const pattern = new RegExp(queries.map((q) => q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "giu");
+  const groups: [HistoryItem[], HistoryItem[]] = [[], []];
   let scanned = 0;
-  let truncated = false;
-  let skip = Math.max(0, opts.offset ?? 0);
+  let skippedActive = 0;
   for (const it of items) {
     if (opts.window !== undefined && it.window !== opts.window) continue;
     scanned++;
-    const idx = it.text.indexOf(q);
-    if (idx < 0) continue;
-    if (skip > 0) {
-      skip--;
+    pattern.lastIndex = 0;
+    if (!pattern.test(it.text)) continue;
+    if (opts.activeIds?.has(it.id)) {
+      skippedActive++;
       continue;
     }
-    if (hits.length >= limit) {
-      truncated = true;
-      break;
-    }
-    let more = 0;
-    let from = idx + q.length;
-    while (true) {
-      const n = it.text.indexOf(q, from);
-      if (n < 0) break;
-      more++;
-      from = n + q.length;
-    }
-    hits.push({ id: it.id, role: it.role, window: it.window, label: it.label, snippet: snippetAround(it.text, idx, q.length, snip), moreMatches: more });
+    const secondary = it.role === "notebook" || it.role === "compaction" || it.role === "branch_summary";
+    groups[secondary ? 1 : 0].push(it);
   }
-  return { hits, scanned, truncated };
+  if (opts.from === "newest") for (const group of groups) group.reverse();
+  const ranked = groups.flat();
+  const offset = Math.max(0, opts.offset ?? 0);
+  const hits = ranked.slice(offset, offset + limit).map((it): SearchHit => {
+    pattern.lastIndex = 0;
+    const first = pattern.exec(it.text)!;
+    let more = 0;
+    while (pattern.exec(it.text)) more++;
+    return { id: it.id, role: it.role, window: it.window, label: it.label, snippet: snippetAround(it.text, first.index, first[0].length, snip), moreMatches: more };
+  });
+  return { hits, scanned, skippedActive, truncated: offset + hits.length < ranked.length };
 }
 
 function snippetAround(text: string, idx: number, len: number, width: number): string {
@@ -240,7 +267,7 @@ export function list(items: readonly HistoryItem[], opts: ListOptions = {}): { i
 
 export function renderSearch(r: SearchResult, opts: SearchOptions): string {
   const off = opts.offset ?? 0;
-  const head = `history search "${opts.query}"${opts.window !== undefined ? ` window #${opts.window}` : ""}: ${r.hits.length} hit${r.hits.length === 1 ? "" : "s"}${off ? ` (from #${off + 1})` : ""} in ${r.scanned} entries${r.truncated ? ` — more hits: repeat with offset: ${off + r.hits.length}` : ""}`;
+  const head = `history search ${JSON.stringify(opts.query)}${opts.window !== undefined ? ` window #${opts.window}` : ""}: ${r.hits.length} hit${r.hits.length === 1 ? "" : "s"}${off ? ` (from #${off + 1})` : ""} in ${r.scanned} entries (original content first; ${opts.from ?? "oldest"} first within each group)${r.truncated ? ` — more hits: repeat with offset: ${off + r.hits.length}` : ""}${r.skippedActive ? `\nSkipped ${r.skippedActive} matching entries already in your active context; includeActive: true searches them too.` : ""}`;
   if (r.hits.length === 0) return head;
   const lines = r.hits.map((h) => `- [history entry=${h.id}] w${h.window} ${h.role} · ${h.label}\n  ${h.snippet}${h.moreMatches ? ` (+${h.moreMatches} more)` : ""}`);
   return `${head}\n${lines.join("\n")}`;

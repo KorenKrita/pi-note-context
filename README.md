@@ -16,6 +16,14 @@ Steps 1–3 of 4 shipped (see DESIGN.md §13) and independently reviewed twice (
 
 `/notes` shows the current notebook. Tools are `notes`, `history`, `new_context`.
 
+## History search
+
+`history({ query: "Jev" })` matches literal substrings without case sensitivity. An array means OR: `history({ query: ["Jev", "rollover"], from: "newest" })` matches either phrase. Spaces and punctuation are literal, not query operators.
+
+Search returns original conversation/tool output first, then notebook revisions and compaction/branch summaries. Each group defaults to oldest-first for compatibility; `from: "newest"` reverses it. Search skips entries whose full indexed text is already in Pi's active context projection (including retained older-window tails), reports the skipped count, and keeps edited/omitted originals searchable. Notebook records are not assumed visible just because their journal entries are recent. Request-local context filters from other extensions are not reflected in Pi's canonical projection.
+
+Use `includeActive: true` to search visible entries too. `offset` counts filtered, ranked hits; keep the other options unchanged while paging. Reading by `id` and `list: true` are unchanged and never exclude active entries.
+
 ## User-requested rollover
 
 When the user explicitly asks for a fresh window, update or review `notes`, wait for its result, then call `new_context({ userRequested: true })`. This bypasses `minReclaimTokens`, not notebook existence or freshness (the host pressure floor never applies to model or user requests). It still refuses duplicate schedules and a window that fits entirely in the retained recent tail. The turn must end after scheduling.

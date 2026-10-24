@@ -10,7 +10,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { buildSessionProjection, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { flushLedger } from "../src/ledger.ts";
 import { ROLLOVER_DETAILS_KIND } from "../src/history.ts";
 import { notebookEntry, rolloverEntry, round, user } from "./fixtures.ts";
@@ -77,7 +77,7 @@ function harness(config: Record<string, unknown> = {}) {
     get signal() {
       return run.controller.signal;
     },
-    sessionManager: { getBranch: () => branch, buildContextEntries: () => branch, getSessionId: () => "s1", getLeafId: () => branch[branch.length - 1]?.id ?? null },
+    sessionManager: { getBranch: () => branch, buildContextEntries: () => branch, buildSessionProjection: () => buildSessionProjection(branch.map((e, i) => ({ ...e, parentId: i ? branch[i - 1]!.id : null }))), getSessionId: () => "s1", getLeafId: () => branch[branch.length - 1]?.id ?? null },
     getContextUsage: () => usage,
     isProjectTrusted: () => true,
     isIdle: () => true,
@@ -94,6 +94,10 @@ function harness(config: Record<string, unknown> = {}) {
   };
   const notes = async (params: unknown) => {
     const r = await tools.get("notes")!.execute("call", params, undefined, undefined, ctx);
+    return r.content.map((c) => c.text).join("\n");
+  };
+  const history = async (params: unknown) => {
+    const r = await tools.get("history")!.execute("call", params, undefined, undefined, ctx);
     return r.content.map((c) => c.text).join("\n");
   };
   const newContext = async (params: unknown = {}) => {
@@ -143,8 +147,19 @@ function harness(config: Record<string, unknown> = {}) {
     run.controller = new AbortController();
     await emit("agent_start");
   };
-  return { branch, ctx, usage, state, emit, notes, newContext, turnEnd, settle, boundary, compactions, piHost, sent, compactCalls, ledgerRows, abort, startRun };
+  return { branch, ctx, usage, state, emit, notes, history, newContext, turnEnd, settle, boundary, compactions, piHost, sent, compactCalls, ledgerRows, abort, startRun };
 }
+
+describe("history tool wiring", () => {
+  test("search defaults to excluding visible messages; includeActive overrides it and id stays unchanged", async () => {
+    const h = harness({ jevEnabled: false });
+    expect(await h.history({ query: "nested comments" })).toContain("0 hits");
+    expect(await h.history({ query: "nested comments" })).toContain("Skipped 1");
+    expect(await h.history({ query: ["NESTED COMMENTS", "absent"], includeActive: true, from: "newest" })).toContain("[history entry=u1]");
+    expect(await h.history({ id: "u1", context: 0 })).toContain("Refactor the parser");
+    await expect(h.history({ query: [] })).rejects.toThrow("non-empty");
+  });
+});
 
 describe("rollover reminder context scope", () => {
   test("current reminder stays live; retained and legacy reminders expire without changing the journal", async () => {

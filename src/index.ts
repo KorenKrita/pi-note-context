@@ -18,7 +18,7 @@ import {
   NOTES_SNIPPET,
   SYSTEM_PROMPT_SECTION,
 } from "./guidance.ts";
-import { currentWindow, indexBranch, isRolloverDetails, list, read, renderList, renderRead, renderSearch, search } from "./history.ts";
+import { activeHistoryIds, currentWindow, indexBranch, isRolloverDetails, list, read, renderList, renderRead, renderSearch, search } from "./history.ts";
 import { appendLedger, flushLedger } from "./ledger.ts";
 import { maintenanceRequestText, reminderText, reminderThreshold, step, zoneFor, type MaintenanceState, type Thresholds } from "./maintenance.ts";
 import { applySections, makeRecord, NOTEBOOK_ENTRY_TYPE, reconstructNotebook, renderNotebook, type Notebook } from "./notebook.ts";
@@ -44,7 +44,9 @@ const NotesParams = Type.Object({
 });
 
 const HistoryParams = Type.Object({
-  query: Type.Optional(Type.String({ description: "Literal substring to search for." })),
+  query: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })], { description: "Case-insensitive literal substring, or an array of substrings matched with OR (any one matches). Spaces and punctuation are literal." })),
+  from: Type.Optional(Type.Union([Type.Literal("oldest"), Type.Literal("newest")], { description: "Search order within each priority group (original content before notebook revisions/summaries). Default oldest. Query only." })),
+  includeActive: Type.Optional(Type.Boolean({ description: "Include search hits already visible in the active context. Default false. Query only; id and list always include them." })),
   id: Type.Optional(Type.String({ description: "Entry id to read in full." })),
   context: Type.Optional(Type.Integer({ minimum: 0, maximum: 5, description: "Neighbouring entries on each side when reading by id. Default 1." })),
   list: Type.Optional(Type.Boolean({ description: "Chronological listing." })),
@@ -352,11 +354,10 @@ export default function noteContext(pi: ExtensionAPI): void {
         return text(renderRead(r, { offset: params.offset ?? 0, maxChars: config.historyReadMaxChars }), { id: r.target.id, window: r.target.window, offset: params.offset ?? 0, totalChars: r.target.text.length });
       }
       if (params.query !== undefined) {
-        if (params.query.length === 0) return fail("history: query must be non-empty.");
-        const opts = { query: params.query, window: params.window, limit: params.limit, offset: params.offset };
+        const opts = { query: params.query, window: params.window, limit: params.limit, offset: params.offset, from: params.from, activeIds: params.includeActive ? undefined : activeHistoryIds(ctx.sessionManager.buildSessionProjection()) };
         const r = search(items, opts);
         appendLedger({ kind: "history", session: sessionId(ctx), window, mode: "search", hits: r.hits.length, turnsSinceRollover: since });
-        return text(renderSearch(r, opts), { hits: r.hits.length, scanned: r.scanned, truncated: r.truncated });
+        return text(renderSearch(r, opts), { hits: r.hits.length, scanned: r.scanned, skippedActive: r.skippedActive, truncated: r.truncated });
       }
       const r = list(items, { window: params.window, limit: params.limit, offset: params.offset });
       appendLedger({ kind: "history", session: sessionId(ctx), window, mode: "list", hits: r.items.length, turnsSinceRollover: since });
