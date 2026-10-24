@@ -186,7 +186,7 @@ Pi's own threshold is `contextWindow − reserveTokens`. This plugin acts earlie
 <notebook>
 ```
 
-No token counts (§4.1): the reminder asks for the action, not a judgement about how much room is left.
+No token counts (§4.1): the reminder asks for the action, not a judgement about how much room is left. `note-context/reminder` carries `details: { window }`. The `context` hook preserves only reminders belonging to the current window; older-window and legacy unscoped reminders become a one-line “expired; no action required” notice, without the stale notebook. This changes only model input, not the persisted journal.
 
 **Fallback state machine** — entered when `usage.tokens ≥ threshold − fallbackBufferTokens` (default 12K) and no rollover is pending:
 

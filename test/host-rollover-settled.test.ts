@@ -13,7 +13,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { flushLedger } from "../src/ledger.ts";
 import { ROLLOVER_DETAILS_KIND } from "../src/history.ts";
-import { notebookEntry, round, user } from "./fixtures.ts";
+import { notebookEntry, rolloverEntry, round, user } from "./fixtures.ts";
 
 // One OS temp root per run; each harness gets its own agent dir under it so config and ledger
 // are isolated per test. Left in place after the run (OS temp cleanup owns it).
@@ -145,6 +145,33 @@ function harness(config: Record<string, unknown> = {}) {
   };
   return { branch, ctx, usage, state, emit, notes, newContext, turnEnd, settle, boundary, compactions, piHost, sent, compactCalls, ledgerRows, abort, startRun };
 }
+
+describe("rollover reminder context scope", () => {
+  test("current reminder stays live; retained and legacy reminders expire without changing the journal", async () => {
+    const h = harness({ entryIdTrailers: false, jevEnabled: false });
+    await h.turnEnd();
+    const sent = h.sent.find((m) => m.customType === "note-context/reminder") as { customType: string; content: string; details: { window: number } };
+    expect(sent).toMatchObject({ details: { window: 1 } });
+    const reminder = { ...sent, role: "custom", timestamp: 1 };
+    const legacy = { ...reminder, details: undefined };
+    const other = { role: "custom", customType: "other", content: "keep", timestamp: 2 };
+    const project = async () => {
+      const results = await h.emit("context", { messages: [reminder, legacy, other] });
+      return (results[0] as { messages: { content: string }[] }).messages;
+    };
+    const before = await project();
+    expect(before[0]).toBe(reminder);
+    expect(before[1]!.content).toContain("expired; no action required");
+    h.branch.push(rolloverEntry("r2", "a10", 2));
+    const after = await project();
+    expect(after[0]!.content).toBe("[note-context] (earlier rollover reminder — expired; no action required)");
+    expect(after[2]).toBe(other);
+    expect(sent).toMatchObject({ content: expect.stringContaining("Then call new_context") });
+    // Returning along the session tree to the original window makes its scoped reminder live.
+    h.branch.pop();
+    expect((await project())[0]).toBe(reminder);
+  });
+});
 
 describe("host rollover: re-check at agent_settled", () => {
   test("valid pending compacts exactly once; a second settle does nothing", async () => {

@@ -57,6 +57,7 @@ const NewContextParams = Type.Object({
   userRequested: Type.Optional(Type.Boolean({ description: "True only when the user explicitly asked for a fresh window; never for a rollover you decided on. Skips the minimum-reclaim check; notebook checks still apply. Default false." })),
 });
 const MAINTENANCE_CUSTOM_TYPE = "note-context/maintenance";
+const REMINDER_CUSTOM_TYPE = "note-context/reminder";
 /** Custom type of the per-request status message written by versions ≤ 0.3; filtered out of context, never written. */
 const LEGACY_STATUS_CUSTOM_TYPE = "note-context/status";
 const OWN_TOOLS = new Set(["notes", "history", "new_context"]);
@@ -798,7 +799,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     reminderShownForWindow = window;
     appendLedger({ kind: "reminder", session: sessionId(ctx), window, zone });
     pi.sendMessage(
-      { customType: "note-context/reminder", content: reminderText(notebook.revision > 0 ? renderNotebook(notebook.sections) : null), display: true },
+      { customType: REMINDER_CUSTOM_TYPE, content: reminderText(notebook.revision > 0 ? renderNotebook(notebook.sections) : null), display: true, details: { window } },
       { deliverAs: "steer" },
     );
   });
@@ -818,11 +819,18 @@ export default function noteContext(pi: ExtensionAPI): void {
   pi.on("context", async (event, ctx) => {
     const branch = branchOf(ctx);
     const activeAttempt = maintenance.kind === "requested" ? maintenance.attempt : null;
+    const window = currentWindow(branch);
     let messages = event.messages
       // Status messages written by earlier versions (a trailing custom message per
       // request) are dropped; the status line now lives inside tool results.
       .filter((m) => !(m.role === "custom" && m.customType === LEGACY_STATUS_CUSTOM_TYPE))
       .map((m) => {
+        // Old reminders carry both a live rollover command and an obsolete notebook snapshot.
+        // Unscoped reminders from older versions cannot be proved current, so expire them too.
+        if (m.role === "custom" && m.customType === REMINDER_CUSTOM_TYPE) {
+          if ((m.details as { window?: number } | undefined)?.window === window) return m;
+          return { ...m, content: "[note-context] (earlier rollover reminder — expired; no action required)" };
+        }
         // A maintenance instruction is imperative; once its attempt is no longer active it must
         // not survive in the retained tail as a live command.
         if (m.role === "custom" && m.customType === MAINTENANCE_CUSTOM_TYPE) {
