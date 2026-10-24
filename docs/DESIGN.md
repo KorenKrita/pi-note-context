@@ -186,7 +186,7 @@ Pi's own threshold is `contextWindow − reserveTokens`. This plugin acts earlie
 **Reminder** — once per window, when `usage.tokens ≥ threshold − leadTokens` (default lead 24K): a steered message
 
 ```
-[note-context] A context-window rollover is due. Update notes against what will leave the window (current notebook below), or call notes({reviewed:true}) if they are already sufficient. Then call new_context.
+[note-context] A context-window rollover is due. Before it, tidy the whole notebook (current notebook below): record what will leave the window, and correct or remove anything outdated or wrong so it is not carried into the new window. If the notes are already accurate and sufficient, call notes({reviewed:true}). Then call new_context.
 <notebook>
 ```
 
@@ -194,7 +194,7 @@ No token counts (§4.1): the reminder asks for the action, not a judgement about
 
 **Fallback state machine** — entered when `usage.tokens ≥ threshold − fallbackBufferTokens` (default 12K) and no rollover is pending:
 
-1. `maintenance:requested` — steer: `[note-context maintenance #N] The host needs a notes checkpoint before it starts a new window. Make one notes write (or notes({reviewed:true})) now; the host will start a new window as soon as it lands. Do not call other tools.` Scope the reminder to this attempt id.
+1. `maintenance:requested` — steer: `[note-context maintenance #N] The host needs a notes checkpoint before it starts a new window. Make one notes write now that tidies the whole notebook, correcting or removing anything outdated or wrong so it is not carried into the new window (or notes({reviewed:true}) if it is already accurate); the host will start a new window as soon as it lands. Do not call other tools.` Scope the reminder to this attempt id.
 2. Next turn: if a notebook write/review lands → `maintenance:checkpointed`; the **host** rolls over at that turn's `turn_end` boundary (compaction + continuation entries, `continue: true`), inside the run. The model is not asked for a second `new_context`. A declined template there hands the window to Pi's threshold compaction.
 3. If the write fails (oversized, invalid) → one repair attempt with the specific error; then step 4.
 4. If no valid checkpoint after the repair attempt, or Pi's own overflow path fires first → return `undefined` from `session_before_compact` so Pi's LLM summary runs. **Never** perform the template rollover without a valid notebook.

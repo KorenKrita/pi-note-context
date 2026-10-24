@@ -220,7 +220,7 @@ describe("status line", () => {
   });
   test("reminder and maintenance request carry no token counts", () => {
     const withBook = reminderText("## Task\nt");
-    expect(withBook.split("\n\n")[0]).toBe("[note-context] A context-window rollover is due. Update notes against what will leave the window (current notebook below), or call notes({reviewed:true}) if they are already sufficient. Then call new_context.");
+    expect(withBook.split("\n\n")[0]).toBe("[note-context] A context-window rollover is due. Before it, tidy the whole notebook (current notebook below): record what will leave the window, and correct or remove anything outdated or wrong so it is not carried into the new window. If the notes are already accurate and sufficient, call notes({reviewed:true}). Then call new_context.");
     expect(withBook.split("\n\n")[0]).not.toMatch(SIZE_FIGURE);
     expect(reminderText(null)).not.toMatch(SIZE_FIGURE);
     expect(maintenanceRequestText(3)).not.toMatch(SIZE_FIGURE);
