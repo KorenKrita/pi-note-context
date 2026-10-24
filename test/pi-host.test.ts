@@ -8,10 +8,16 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Type, fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { FauxResponseStep, TranscriptContext } from "@earendil-works/pi-ai";
+import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { IDLE_TIDY_CUSTOM_TYPE } from "../src/idle-tidy.ts";
 import { withIdleTimers } from "./idle-timer.ts";
+
+// Optional installed-host contract check without changing dependencies or user configuration.
+// NOTE_CONTEXT_TEST_PI_ROOT points at a node_modules/@earendil-works directory.
+const hostRoot = process.env["NOTE_CONTEXT_TEST_PI_ROOT"];
+const { Type, fauxAssistantMessage, fauxProvider, fauxToolCall } = await import(hostRoot ? join(hostRoot, "pi-ai/dist/index.js") : "@earendil-works/pi-ai") as typeof import("@earendil-works/pi-ai");
+const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = await import(hostRoot ? join(hostRoot, "pi-coding-agent/dist/index.js") : "@earendil-works/pi-coding-agent") as typeof import("@earendil-works/pi-coding-agent");
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "note-context-host-"));
 const savedDir = process.env["PI_CODING_AGENT_DIR"];
@@ -106,6 +112,38 @@ describe("Pi host integration", () => {
       expect(next).not.toContain("Idle notebook tidy:");
       const persisted = sessionManager.getBranch().find((e) => e.type === "custom_message" && e.customType === IDLE_TIDY_CUSTOM_TYPE);
       expect(persisted?.type === "custom_message" && persisted.content).toContain("Idle notebook tidy:");
+    } finally {
+      session.dispose();
+    }
+  }));
+
+  test("a timer firing inside an earlier settlement handler keeps the deferred tidy request live", async () => withIdleTimers(async (timers) => {
+    let firstSettlement = true;
+    let firedWhileIdle = false;
+    const { session, seen } = await host((s) => [
+      record(s, fauxAssistantMessage("Done with the user task.")),
+      record(s, fauxAssistantMessage(fauxToolCall("notes", { sections: { Task: "tidied" } }), { stopReason: "toolUse" })),
+      record(s, fauxAssistantMessage("Tidied; stopping.")),
+    ], { idleTidyEnabled: true, jevEnabled: false }, 200_000, [
+      (pi) => { pi.on("agent_settled", async (_event, ctx) => {
+        if (!firstSettlement) return;
+        firstSettlement = false;
+        await Promise.resolve(); // earlier async handler is still being dispatched
+        firedWhileIdle = ctx.isIdle();
+        expect(timers).toHaveLength(1); // agent_end, not agent_settled, started the clock
+        timers[0]!.fire(); // Pi defers this new run until all settlement handlers return
+      }); },
+    ]);
+    try {
+      await session.bindExtensions({ mode: "rpc" });
+      await session.prompt("Do the task.", { source: "rpc" });
+      await session.waitForIdle();
+      expect(firedWhileIdle).toBe(true);
+      expect(seen).toHaveLength(3);
+      const tidy = JSON.stringify(seen[1]!.messages);
+      expect(tidy.includes("Idle notebook tidy:")).toBe(true);
+      expect(tidy.includes("earlier idle notebook tidy — expired")).toBe(false);
+      expect(timers).toHaveLength(1);
     } finally {
       session.dispose();
     }

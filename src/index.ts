@@ -679,7 +679,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     return undefined;
   });
   pi.on("agent_start", async (_event, ctx) => {
-    idleTidy.cancel();
+    idleTidy.agentStarted();
     classifyPending(ctx);
     runAborted = false;
   });

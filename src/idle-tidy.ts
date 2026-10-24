@@ -17,6 +17,8 @@ export class IdleTidy {
   private generation = 0;
   private eligible = false;
   private requestId: string | null = null;
+  /** Scope owned by the low-level run that most recently started, not a deferred next run. */
+  private runRequestId: string | null = null;
 
   constructor(private readonly enabled: boolean, private readonly delayMs: number, private readonly schedule: ScheduleIdle = scheduleIdle) {}
 
@@ -34,6 +36,11 @@ export class IdleTidy {
     if (!genuineUser) return;
     this.eligible = true;
     this.requestId = null; // Real user work supersedes the housekeeping request immediately.
+  }
+
+  agentStarted(): void {
+    this.cancel();
+    this.runRequestId = this.requestId;
   }
 
   /** agent_end is the clock origin; retries/continuations cancel it on agent_start. */
@@ -57,12 +64,17 @@ export class IdleTidy {
     }, this.delayMs);
   }
 
-  /** Keep the scope across low-level agent_end/restart pairs; finish only at final settlement. */
-  settled(): void { this.requestId = null; }
+  /** A timer may dispatch a deferred tidy while an earlier settlement handler is awaiting.
+   * Only clear the request owned by the ending run, never that newly dispatched request. */
+  settled(): void {
+    if (this.requestId === this.runRequestId) this.requestId = null;
+    this.runRequestId = null;
+  }
 
   reset(): void {
     this.cancel();
     this.eligible = false;
     this.requestId = null;
+    this.runRequestId = null;
   }
 }

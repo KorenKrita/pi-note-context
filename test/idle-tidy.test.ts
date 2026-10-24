@@ -57,7 +57,7 @@ describe("idle tidy clock", () => {
     expect(sent).toBe(0);
     end();
     c.advance(90);
-    idle.cancel(); // agent_start of an automatic retry
+    idle.agentStarted(); // agent_start of an automatic retry
     c.advance(100);
     expect(sent).toBe(0);
     end();
@@ -76,10 +76,10 @@ describe("idle tidy clock", () => {
     end();
     c.advance(100);
     const first = idle.activeRequest;
-    idle.cancel(); // tidy agent_start
+    idle.agentStarted(); // tidy agent_start
     end();
     expect(idle.activeRequest).toBe(first); // stay scoped across agent_end → auto continuation
-    idle.cancel();
+    idle.agentStarted();
     end();
     idle.settled();
     expect(idle.activeRequest).toBeNull();
@@ -93,6 +93,24 @@ describe("idle tidy clock", () => {
     c.advance(100);
     expect(sent).toHaveLength(2);
     expect(sent[0]).not.toBe(sent[1]);
+  });
+
+  test("settlement owns only its started request, not one dispatched while settling", () => {
+    const c = clock();
+    const idle = new IdleTidy(true, 100, c.schedule);
+    idle.input(true);
+    idle.agentStarted();
+    idle.agentEnded(true, () => true, () => {});
+    c.advance(100); // before the previous run\'s settlement handler is reached
+    const deferred = idle.activeRequest;
+    expect(deferred).not.toBeNull();
+    idle.settled();
+    expect(idle.activeRequest).toBe(deferred);
+    idle.agentStarted();
+    idle.agentEnded(true, () => true, () => { throw new Error("tidy must not re-arm"); });
+    idle.settled();
+    expect(idle.activeRequest).toBeNull();
+    expect(c.timers).toHaveLength(1);
   });
 
   test("reset invalidates even an already-dispatched stale callback and active request ids", () => {
