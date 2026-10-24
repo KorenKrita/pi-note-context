@@ -161,6 +161,20 @@ describe("Pi host integration", () => {
     }
   }));
 
+  test.each([undefined, false, true])("history search excludes its issuing assistant for includeActive=%s", async (includeActive) => {
+    const { session, sessionManager } = await host((s) => [
+      record(s, fauxAssistantMessage(fauxToolCall("history", { query: "unobtainium-unique-marker", ...(includeActive === undefined ? {} : { includeActive }), from: "newest" }), { stopReason: "toolUse" })),
+      record(s, fauxAssistantMessage("No match.")),
+    ], { jevEnabled: false });
+    try {
+      await session.prompt("Search for a term absent from our conversation.");
+      const result = sessionManager.getBranch().find((e) => e.type === "message" && e.message.role === "toolResult" && e.message.toolName === "history");
+      expect(result?.type === "message" && result.message.role === "toolResult" && result.message.details).toMatchObject({ hits: 0, skippedActive: 0 });
+    } finally {
+      session.dispose();
+    }
+  });
+
   test("guidance is added as a structured system prompt section, not a forced prompt", async () => {
     const { session, seen } = await host((s) => [record(s, fauxAssistantMessage("ok"))]);
     await session.prompt("hello");

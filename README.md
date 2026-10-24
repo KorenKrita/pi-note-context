@@ -22,7 +22,7 @@ Steps 1–3 of 4 shipped (see DESIGN.md §13) and independently reviewed twice (
 
 Search returns original conversation/tool output first, then notebook revisions and compaction/branch summaries. Each group defaults to oldest-first for compatibility; `from: "newest"` reverses it. Search skips entries whose full indexed text is already in Pi's active context projection (including retained older-window tails), reports the skipped count, and keeps edited/omitted originals searchable. Notebook records are not assumed visible just because their journal entries are recent. Request-local context filters from other extensions are not reflected in Pi's canonical projection.
 
-Use `includeActive: true` to search visible entries too. `offset` counts filtered, ranked hits; keep the other options unchanged while paging. Reading by `id` and `list: true` are unchanged and never exclude active entries.
+Use `includeActive: true` to search visible entries too. `offset` counts filtered, ranked hits; keep the other options unchanged while paging. Reading by `id` and `list: true` are unchanged and never exclude active entries. Query searches exclude the assistant entry issuing that call (including its text and sibling tool calls), so the query arguments cannot match themselves or inflate the skipped count. This exclusion applies even with `includeActive: true`; older assistant entries remain searchable.
 
 ## User-requested rollover
 

@@ -83,6 +83,8 @@ Read-back over the **model-visible** part of the current branch's journal, inclu
 
 Allowlist of indexed entry kinds: user messages, assistant messages (text and tool-call arguments), tool results, compaction summaries, branch summaries, this plugin's own notebook and rollover entries. Excluded: bash executions marked `excludeFromContext`, other extensions' custom entries, provider-opaque state, and `history`'s own results (to avoid recursive duplication).
 
+Query searches first exclude `issuingAssistantId(ctx)`: Pi journals the assistant before tools run, and its history arguments would otherwise match their own query. This applies even with `includeActive: true`, excludes sibling calls/text in that one entry, and does not change id reads or listing. Older assistant entries remain indexed.
+
 Search excludes entries whose full indexed text already appears in `buildSessionProjection()` and reports the skipped count; `includeActive: true` overrides this. This accounts for retained tails across windows and persisted context edits, while plain notebook records (not model-visible) remain searchable. Other extensions’ request-local context filters are not reflected in the canonical projection. Search `offset` counts filtered, ranked hits; all other options must stay unchanged across pages. Empty queries/arrays/array members are rejected; spaces and regex punctuation stay literal. Read-by-id and listing do not apply search ranking or active-context exclusion.
 
 Output is bounded by a character budget with pagination.
