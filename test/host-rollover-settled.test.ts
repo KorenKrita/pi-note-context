@@ -123,6 +123,7 @@ function harness(config: Record<string, unknown> = {}) {
       if (piHost.rejectBoundary) continue;
       for (const d of drafts) {
         if (d.type === "compaction") branch.push({ id: `cmp${++committed}`, parentId: null, timestamp: new Date().toISOString(), type: "compaction", summary: "", firstKeptEntryId: "a10", tokensBefore: 0, details: d.details } as SessionEntry);
+        if (d.type === "custom_message") branch.push({ ...d, id: `msg${++committed}`, parentId: null, timestamp: new Date().toISOString() } as SessionEntry);
       }
     }
   };
@@ -131,9 +132,16 @@ function harness(config: Record<string, unknown> = {}) {
   /** turn_end for an assistant message, as Pi emits it after every assistant response. */
   const turnEnd = async (message: Record<string, unknown> = { role: "assistant" }, outcome = "completed") =>
     collect("turn_end", await emit("turn_end", { message, entries: earlier(), continue: false, outcome }));
-  /** Pi's settle sequence: the actionable agent_before_settle boundary, then agent_settled. */
-  const settle = async (outcome = "completed") => {
+  const beforeSettle = async (outcome = "completed") =>
     collect("agent_before_settle", await emit("agent_before_settle", { entries: earlier(), continue: false, outcome }));
+  /** A continuation reaches turn_start/context before agent_settled; never silently skip it in tidy tests. */
+  const nextRequest = async () => {
+    await emit("turn_start");
+    return emit("context", { messages: ctx.sessionManager.buildSessionProjection().messages });
+  };
+  /** Tests not inspecting a continuation can go straight to final settlement. */
+  const settle = async (outcome = "completed") => {
+    await beforeSettle(outcome);
     await emit("agent_settled");
   };
   /** Rollovers started either way: boundary compaction drafts plus ctx.compact() calls. */
@@ -153,7 +161,7 @@ function harness(config: Record<string, unknown> = {}) {
     run.controller = new AbortController();
     await emit("agent_start");
   };
-  return { branch, ctx, usage, state, emit, notes, history, newContext, turnEnd, settle, boundary, compactions, piHost, sent, deliveries, compactCalls, ledgerRows, abort, startRun };
+  return { branch, ctx, usage, state, emit, notes, history, newContext, turnEnd, settle, beforeSettle, nextRequest, boundary, compactions, piHost, sent, deliveries, compactCalls, ledgerRows, abort, startRun };
 }
 
 describe("idle tidy hook policy", () => {
@@ -181,6 +189,12 @@ describe("idle tidy hook policy", () => {
     await h.turnEnd();
     expect(h.sent).toHaveLength(1); // no ordinary reminder
     expect(await h.newContext()).toContain("rollover scheduled");
+    await h.beforeSettle();
+    const next = JSON.stringify(await h.nextRequest());
+    expect(next).toContain("Idle notebook tidy is complete");
+    expect(next).toContain("Do not resume any work");
+    expect(next).not.toContain("Continue with the notebook's Next action");
+    await h.emit("agent_end");
     await h.settle();
     expect(h.compactions()).toBe(1);
     const expired = await h.emit("context", { messages: [message] });
@@ -210,13 +224,35 @@ describe("idle tidy hook policy", () => {
     await h.notes({ reviewed: true });
     await h.turnEnd();
     expect(h.boundary[0]).toMatchObject({ reason: "turn_end", drafts: [{ type: "compaction", details: { reason: "fallback" } }, { type: "custom_message" }] });
-    await h.emit("turn_start"); // reconcile without ending the tidy run
+    const next = JSON.stringify(await h.nextRequest()); // real continuation, before settlement
+    expect(next).toContain("Idle notebook tidy is complete");
+    expect(next).toContain("Do not resume any work");
+    expect(next).not.toContain("Continue with the notebook's Next action");
     const expired = await h.emit("context", { messages: [message] });
     expect((expired[0] as { messages: { content: string }[] }).messages[0]!.content).toContain("expired; no action required");
     expect(await h.notes({ reviewed: true })).not.toContain("Rollover scheduled by the host");
     await h.emit("agent_end");
     await h.settle();
     expect(timers).toHaveLength(1);
+  }));
+
+  test("tidy continuation survives settled cleanup on external-owner and declined-boundary compaction", async () => withIdleTimers(async (timers) => {
+    for (const external of [false, true]) {
+      const h = harness({ idleTidyEnabled: true, jevEnabled: false, externalCompactionModels: external ? ["p/m"] : [] });
+      await beginTidy(h, timers);
+      await h.notes({ reviewed: true });
+      await h.newContext();
+      h.piHost.rejectBoundary = !external;
+      await h.settle();
+      expect(h.compactCalls).toHaveLength(1);
+      h.compactCalls[0]!.onComplete!(); // after settled() has already cleared the tidy request
+      const continuation = h.sent.at(-1)!;
+      await h.startRun();
+      const next = JSON.stringify(await h.emit("context", { messages: [{ ...continuation, role: "custom", timestamp: 1 }] }));
+      expect(next).toContain("Idle notebook tidy is complete");
+      expect(next).toContain("Do not resume any work");
+      expect(next).not.toContain("Continue with the notebook's Next action");
+    }
   }));
 
   test("final settlement expires tidy in the same window; extension input cannot re-arm but genuine input can", async () => withIdleTimers(async (timers) => {

@@ -182,6 +182,35 @@ describe("Pi host integration", () => {
     expect(compaction?.details?.reason).toBe("model");
   });
 
+  test("idle tidy new_context reaches a housekeeping-only continuation before final settlement", async () => withIdleTimers(async (timers) => {
+    const { session, seen, events } = await host((s) => [
+      record(s, fauxAssistantMessage("Ready.")),
+      record(s, fauxAssistantMessage(fauxToolCall("dump", {}), { stopReason: "toolUse" })),
+      record(s, fauxAssistantMessage("Done; waiting for the user.")),
+      record(s, fauxAssistantMessage(fauxToolCall("notes", { sections: { Task: "parser", Next: "edit parseComment" } }), { stopReason: "toolUse" })),
+      record(s, fauxAssistantMessage(fauxToolCall("new_context", {}), { stopReason: "toolUse" })),
+      record(s, fauxAssistantMessage("Ending for the rollover.")),
+      record(s, fauxAssistantMessage("Housekeeping complete; stopping.")),
+    ], { idleTidyEnabled: true, jevEnabled: false, minReclaimTokens: 1_000 });
+    try {
+      await session.bindExtensions({ mode: "rpc" });
+      await promptLong(session);
+      timers.at(-1)!.fire();
+      await session.waitForIdle();
+      expect(seen).toHaveLength(7);
+      expect(events.slice(events.indexOf("compaction"))).toEqual(["compaction", "agent_start", "agent_settled"]);
+      const next = text(seen[6]!);
+      expect(next).toContain("edit parseComment"); // unfinished task survives, but is not an instruction to resume
+      expect(next).toContain("Idle notebook tidy is complete");
+      expect(next).toContain("Do not resume any work");
+      expect(next).not.toContain("Continue with the notebook's Next action");
+      expect(next).not.toContain("Idle notebook tidy:");
+      expect(timers).toHaveLength(2); // only the two genuine user runs armed a clock
+    } finally {
+      session.dispose();
+    }
+  }));
+
   test("Jev flags a user decision the notes miss on the next tool result, once", async () => {
     const asked: string[] = [];
     const { session, seen } = await host(

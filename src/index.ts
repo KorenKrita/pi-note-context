@@ -71,6 +71,7 @@ export default function noteContext(pi: ExtensionAPI): void {
 
   const SCHEDULED_CONTINUE = "[note-context] New context window started. Continue with the notebook's Next action.";
   const FALLBACK_CONTINUE = "[note-context] New context window started after the maintenance checkpoint. Continue with the notebook's Next action.";
+  const TIDY_CONTINUE = "[note-context] New context window started. Idle notebook tidy is complete. Do not resume any work or execute the notebook's Next action. End this run now.";
 
   // ------------------------------------------------------------ volatile state
   // All of this is rebuilt from the journal or reset on session replacement.
@@ -461,13 +462,14 @@ export default function noteContext(pi: ExtensionAPI): void {
         return;
       }
       // An external compaction owner writes the summary, so this goes through Pi's compaction.
-      // ctx.compact() aborts the in-flight run; a continuation resumes the task afterwards.
+      // Capture the run policy before compaction/settlement can clear its tidy scope.
+      const continueText = idleTidy.activeRequest !== null ? TIDY_CONTINUE : FALLBACK_CONTINUE;
       inFlightRollover = { reason: "fallback" };
       ctx.compact({
         onComplete: () => {
           inFlightRollover = null;
           pi.sendMessage(
-            { customType: "note-context/continue", content: FALLBACK_CONTINUE, display: true },
+            { customType: "note-context/continue", content: continueText, display: true },
             { deliverAs: "followUp", triggerTurn: true },
           );
         },
@@ -714,7 +716,7 @@ export default function noteContext(pi: ExtensionAPI): void {
       pendingRollover = null;
       return undefined;
     }
-    const drafts = boundaryRollover(ctx, pendingRollover.reason, SCHEDULED_CONTINUE);
+    const drafts = boundaryRollover(ctx, pendingRollover.reason, idleTidy.activeRequest !== null ? TIDY_CONTINUE : SCHEDULED_CONTINUE);
     // Declined (ledger row written): the schedule stays for agent_settled, which hands the
     // window to Pi's compaction exactly as before boundary rollovers existed.
     if (!drafts) return undefined;
@@ -724,6 +726,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   // Rollovers agent_before_settle did not take: an external compaction owner, a declined
   // template (Pi's LLM summary takes over), or another extension compacting at that boundary.
   pi.on("agent_settled", async (_event, ctx) => {
+    const continueText = idleTidy.activeRequest !== null ? TIDY_CONTINUE : SCHEDULED_CONTINUE;
     idleTidy.settled();
     reconcileProposal(ctx);
     if (!pendingRollover || !scheduled(pendingRollover.reason)) return;
@@ -742,7 +745,7 @@ export default function noteContext(pi: ExtensionAPI): void {
       onComplete: () => {
         inFlightRollover = null;
         pi.sendMessage(
-          { customType: "note-context/continue", content: SCHEDULED_CONTINUE, display: true },
+          { customType: "note-context/continue", content: continueText, display: true },
           { deliverAs: "followUp", triggerTurn: true },
         );
       },
@@ -785,7 +788,7 @@ export default function noteContext(pi: ExtensionAPI): void {
         maintenance = { kind: "idle" };
         return undefined;
       }
-      const drafts = boundaryRollover(ctx, "fallback", FALLBACK_CONTINUE);
+      const drafts = boundaryRollover(ctx, "fallback", idleTidy.activeRequest !== null ? TIDY_CONTINUE : FALLBACK_CONTINUE);
       if (drafts) return { entries: [...event.entries, ...drafts], continue: true };
       // Declined (ledger row written): hand this window to Pi's threshold compaction.
       maintenance = { kind: "idle" };

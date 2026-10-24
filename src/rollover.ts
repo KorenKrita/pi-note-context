@@ -351,7 +351,7 @@ export function renderRolloverSummary(s: SummaryInput): string {
     }
   }
   lines.push("");
-  lines.push("Continue with the notebook's Next action. Before investigating, evaluating or recommending something, check `history` for an earlier result on that topic (an entry from the index above, or a query on its key term) and build on it instead of redoing the work.");
+  lines.push("Outside idle notebook tidy, continue with the notebook's Next action; idle tidy must end without resuming work. Before investigating, evaluating or recommending something, check `history` for an earlier result on that topic (an entry from the index above, or a query on its key term) and build on it instead of redoing the work.");
   return lines.join("\n");
 }
 
