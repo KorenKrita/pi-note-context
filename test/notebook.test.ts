@@ -76,6 +76,46 @@ describe("applySections", () => {
     expect(r.merged).toEqual(["S7", "S8"]);
   });
 
+  const full = { Task: "t", State: "s", Decisions: "d", Next: "n", Refs: "r", A: "a", B: "b", C: "c" };
+
+  test("prefixes every line of a folded multi-line section, so fences and headings stay inert", () => {
+    const r = applySections(full, { sections: { D: "- one\r\n## Sub\n```ts\nx\n```" } });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.sections.State).toBe("s\nD: - one\nD: ## Sub\nD: ```ts\nD: x\nD: ```");
+    expect(renderNotebook(r.sections).match(/^## /gm)).toHaveLength(8);
+  });
+
+  test("re-writing a folded section replaces its lines in State instead of appending", () => {
+    const first = applySections(full, { sections: { D: "old" } });
+    if (!first.ok) throw new Error("first write failed");
+    const r = applySections(first.sections, { sections: { D: "new" } });
+    expect(r.ok && r.sections.State).toBe("s\nD: new");
+  });
+
+  test("deleting a folded section removes its lines from State", () => {
+    const first = applySections(full, { sections: { D: "x\ny" } });
+    if (!first.ok) throw new Error("first write failed");
+    const r = applySections(first.sections, { sections: { D: "" } });
+    expect(r.ok && r.sections.State).toBe("s");
+    expect(r.ok && r.changed).toBe(true);
+  });
+
+  test("a fold that pushes the notebook over the size limit is rejected whole", () => {
+    const r = applySections(full, { sections: { D: "x".repeat(DEFAULT_LIMITS.maxBytes) } });
+    expect(!r.ok && r.reason).toBe("too_large");
+  });
+
+  test("replaceAll folds only within the new section set", () => {
+    const many: Record<string, string> = { Task: "t" };
+    for (let i = 0; i < MAX_SECTIONS; i++) many[`S${i}`] = "x";
+    const r = applySections(full, { sections: many, replaceAll: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(Object.keys(r.sections)).toEqual(["Task", "State", "S0", "S1", "S2", "S3", "S4", "S5"]);
+    expect(r.sections.State).toBe("S6: x\nS7: x");
+  });
+
   test("a write within the cap reports nothing merged", () => {
     const r = applySections({}, { sections: { Task: "t", Custom: "c" } });
     expect(r.ok && r.merged).toEqual([]);

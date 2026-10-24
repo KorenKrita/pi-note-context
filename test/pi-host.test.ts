@@ -288,6 +288,25 @@ describe("Pi host integration", () => {
     await session.waitForIdle();
   };
 
+  test("a notes write past the section cap lands and the next request asks the model to tidy", async () => {
+    const sections: Record<string, string> = { Task: "t", State: "s" };
+    for (let i = 0; i < 7; i++) sections[`Extra${i}`] = `line ${i}`;
+    const { session, seen } = await host(
+      (s) => [
+        record(s, fauxAssistantMessage(fauxToolCall("notes", { sections }), { stopReason: "toolUse" })),
+        record(s, fauxAssistantMessage("Done.")),
+      ],
+      { autoRollover: false, jevEnabled: false },
+    );
+    await session.prompt("Take notes.");
+    await session.waitForIdle();
+    session.dispose();
+    const next = JSON.stringify(seen[1]!.messages);
+    expect(next).toContain("saved: 8 section(s)");
+    expect(next).toContain("Extra6 were folded into State");
+    expect(next).toContain("Tidy the notebook now");
+  });
+
   test("model new_context rolls over at agent_before_settle: one settle, compaction before it, continuation in the new window", async () => {
     const { session, sessionManager, seen, events } = await host(
       (s) => [

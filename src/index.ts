@@ -334,20 +334,20 @@ export default function noteContext(pi: ExtensionAPI): void {
         onNotesFailed(ctx, `${result.reason}: ${result.detail}`);
         return fail(`notes rejected (${result.reason}): ${result.detail}`);
       }
+      const merged = result.merged.length > 0
+        ? `\nOver ${MAX_SECTIONS} sections: ${result.merged.join(", ")} were folded into State, one "Name: line" per line. Tidy the notebook now: move each folded line into the canonical section it belongs to, drop what is stale, and keep custom sections few.`
+        : "";
       if (!result.changed && !params.replaceAll) {
         const { record, auto } = commitReview();
-        return text(`Notebook revision ${record.revision}: content unchanged, review marker updated.${auto}`, { revision: record.revision, reviewOnly: true, autoRollover: auto !== "" });
+        return text(`Notebook revision ${record.revision}: content unchanged, review marker updated.${merged}${auto}`, { revision: record.revision, reviewOnly: true, merged: result.merged, autoRollover: auto !== "" });
       }
       const record = makeRecord(current, result.sections, issuingAssistantId(ctx), false, ctx.getContextUsage()?.tokens ?? null);
       pi.appendEntry(NOTEBOOK_ENTRY_TYPE, record);
-      appendLedger({ kind: "notes_write", session: sessionId(ctx), window, revision: record.revision, bytes: result.size.bytes, reviewOnly: false });
+      appendLedger({ kind: "notes_write", session: sessionId(ctx), window, revision: record.revision, bytes: result.size.bytes, reviewOnly: false, ...(result.merged.length > 0 ? { merged: result.merged } : {}) });
       onNotesLanded(ctx, record.revision);
       const auto = considerAutoRollover(ctx, notebookOf(ctx));
       const remainingBytes = config.limits.maxBytes - result.size.bytes;
       const remainingTokens = config.limits.maxTokens - result.size.tokensEstimate;
-      const merged = result.merged.length > 0
-        ? `\nOver ${MAX_SECTIONS} sections: ${result.merged.join(", ")} were folded into State as "Name: text" lines. Tidy the notebook now: move each folded line into the canonical section it belongs to, drop what is stale, and keep custom sections few.`
-        : "";
       return text(
         `Notebook revision ${record.revision} saved: ${Object.keys(result.sections).length} section(s), ${result.size.bytes} bytes / ~${result.size.tokensEstimate} tokens; ${remainingBytes} bytes / ~${remainingTokens} tokens remaining.${merged}${auto}`,
         { revision: record.revision, sections: Object.keys(result.sections), merged: result.merged, bytes: result.size.bytes, tokensEstimate: result.size.tokensEstimate, autoRollover: auto !== "" },

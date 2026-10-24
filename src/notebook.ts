@@ -101,6 +101,9 @@ export function applySections(current: Record<string, string>, input: ApplyInput
   const next: Record<string, string> = Object.assign(Object.create(null), input.replaceAll ? {} : current);
   for (const [name, text] of Object.entries(input.sections)) {
     const trimmed = text.trim();
+    // A name that is not a section may have been folded into State earlier: deleting or
+    // rewriting it replaces those lines instead of leaving them behind.
+    if (!Object.hasOwn(next, name)) stripFolded(next, name);
     if (trimmed.length === 0) delete next[name];
     else next[name] = trimmed;
   }
@@ -146,10 +149,21 @@ function foldOverflow(sections: Record<string, string>): string[] {
   if (ordered.length <= MAX_SECTIONS) return [];
   const keep = Object.hasOwn(sections, "State") ? MAX_SECTIONS : MAX_SECTIONS - 1;
   const folded = ordered.slice(keep).filter((name) => !(CANONICAL_SECTIONS as readonly string[]).includes(name));
-  const lines = folded.map((name) => `${name}: ${sections[name]!}`);
+  // Every line carries the prefix, so a folded fence or `## ` line cannot open a block or a heading.
+  const lines = folded.flatMap((name) => sections[name]!.split(/\r\n|\r|\n/).map((line) => `${name}: ${line}`));
   sections["State"] = [sections["State"], ...lines].filter(Boolean).join("\n");
   for (const name of folded) delete sections[name];
   return folded;
+}
+
+function stripFolded(sections: Record<string, string>, name: string): void {
+  const state = sections["State"];
+  if (state === undefined) return;
+  const prefix = `${name}: `;
+  const kept = state.split("\n").filter((line) => !line.startsWith(prefix)).join("\n").trim();
+  if (kept === state) return;
+  if (kept.length === 0) delete sections["State"];
+  else sections["State"] = kept;
 }
 
 /** Canonical sections first in canonical order, then custom sections in insertion order. */
