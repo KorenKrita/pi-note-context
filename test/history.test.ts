@@ -160,7 +160,9 @@ describe("search recall and ranking", () => {
     expect(p1.truncated).toBe(true);
     expect(p3.truncated).toBe(false);
     expect(renderSearch(p1, opts)).toContain("offset: 2");
-    expect(renderSearch(p1, opts)).toContain("Skipped 1 matching entries already in your active context");
+    expect(renderSearch(p1, opts)).toContain("Skipped 1 matching entries present in Pi's canonical session projection");
+    expect(renderSearch(p1, opts)).toContain("Request-local extensions may hide their originals");
+    expect(renderSearch(p1, opts)).not.toContain("already in your active context");
     expect(search(items, { ...opts, window: 2 }).hits.map((h) => h.id)).toEqual(["n2", "b1"]);
   });
 

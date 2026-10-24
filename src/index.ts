@@ -47,7 +47,7 @@ const NotesParams = Type.Object({
 const HistoryParams = Type.Object({
   query: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })], { description: "Case-insensitive literal substring, or an array of substrings matched with OR (any one matches). Spaces and punctuation are literal." })),
   from: Type.Optional(Type.Union([Type.Literal("oldest"), Type.Literal("newest")], { description: "Search order within each priority group (original content before notebook revisions/summaries). Default oldest. Query only." })),
-  includeActive: Type.Optional(Type.Boolean({ description: "Include search hits already visible in the active context. Default false. Query only; id and list always include them." })),
+  includeActive: Type.Optional(Type.Boolean({ description: "Include hits from Pi's canonical session projection (default true). False skips those entries as a heuristic; request-local extensions may hide their originals. Query only; id and list always include them." })),
   id: Type.Optional(Type.String({ description: "Entry id to read in full." })),
   context: Type.Optional(Type.Integer({ minimum: 0, maximum: 5, description: "Neighbouring entries on each side when reading by id. Default 1." })),
   list: Type.Optional(Type.Boolean({ description: "Chronological listing." })),
@@ -358,7 +358,7 @@ export default function noteContext(pi: ExtensionAPI): void {
         return text(renderRead(r, { offset: params.offset ?? 0, maxChars: config.historyReadMaxChars }), { id: r.target.id, window: r.target.window, offset: params.offset ?? 0, totalChars: r.target.text.length });
       }
       if (params.query !== undefined) {
-        const opts = { query: params.query, window: params.window, limit: params.limit, offset: params.offset, from: params.from, activeIds: params.includeActive ? undefined : activeHistoryIds(ctx.sessionManager.buildSessionProjection()) };
+        const opts = { query: params.query, window: params.window, limit: params.limit, offset: params.offset, from: params.from, activeIds: params.includeActive === false ? activeHistoryIds(ctx.sessionManager.buildSessionProjection()) : undefined };
         // The issuing message is already journaled and contains this query in its tool arguments.
         // Exclude the whole entry before searching/counting, even with includeActive:true.
         const selfId = issuingAssistantId(ctx);

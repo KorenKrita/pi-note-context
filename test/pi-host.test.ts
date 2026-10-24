@@ -27,7 +27,7 @@ afterAll(() => {
 });
 let runs = 0;
 
-async function host(responses: (seen: TranscriptContext[]) => FauxResponseStep[], config: Record<string, unknown> = {}, contextWindow = 200_000, before: ExtensionFactory[] = [], classify?: (state: Record<string, unknown>, questions: Record<string, unknown>) => Record<string, unknown>) {
+async function host(responses: (seen: TranscriptContext[]) => FauxResponseStep[], config: Record<string, unknown> = {}, contextWindow = 200_000, before: ExtensionFactory[] = [], classify?: (state: Record<string, unknown>, questions: Record<string, unknown>) => Record<string, unknown>, after: ExtensionFactory[] = []) {
   const agentDir = join(tmpRoot, `agent-${++runs}`);
   mkdirSync(agentDir, { recursive: true });
   writeFileSync(join(agentDir, "pi-note-context.json"), JSON.stringify(config));
@@ -54,6 +54,7 @@ async function host(responses: (seen: TranscriptContext[]) => FauxResponseStep[]
             })]
         : []),
       noteContext,
+      ...after,
       (pi) =>
         pi.registerTool({
           name: "dump", label: "dump", description: "test output", parameters: Type.Object({}),
@@ -174,6 +175,35 @@ describe("Pi host integration", () => {
       session.dispose();
     }
   });
+
+  for (const [phase, placement] of [["context", "before"], ["context", "after"], ["context_with_system", "before"]] as const) {
+    test.each([undefined, true, false])(`history can recover request-local replacements (${phase}, ${placement}, includeActive=%s)`, async (includeActive) => {
+      const replaceOutput: ExtensionFactory = (pi) => {
+        const replace = <M extends { role: string; toolName?: string }>(messages: M[]): M[] => messages.map((m) => m.role === "toolResult" && m.toolName === "dump"
+          ? { ...m, content: [{ type: "text" as const, text: "[ObservationPack placeholder]" }] } : m);
+        if (phase === "context") pi.on("context", (event) => ({ messages: replace(event.messages) }));
+        else pi.on("context_with_system", (event) => ({ messages: replace(event.messages) }));
+      };
+      const { session, sessionManager, seen } = await host((s) => [
+        record(s, fauxAssistantMessage(fauxToolCall("dump", {}), { stopReason: "toolUse" })),
+        record(s, fauxAssistantMessage(fauxToolCall("history", { query: "output output", ...(includeActive === undefined ? {} : { includeActive }) }), { stopReason: "toolUse" })),
+        record(s, fauxAssistantMessage("Recovered.")),
+      ], { jevEnabled: false }, 200_000, placement === "before" ? [replaceOutput] : [], undefined, placement === "after" ? [replaceOutput] : []);
+      try {
+        await session.prompt("Read an output, then search its original.");
+        const request = JSON.stringify(seen[1]!.messages);
+        expect(request.includes("[ObservationPack placeholder]")).toBe(true);
+        expect(request.includes("output output")).toBe(false); // canonical original was not sent to the model
+        const result = sessionManager.getBranch().find((e) => e.type === "message" && e.message.role === "toolResult" && e.message.toolName === "history");
+        expect(result?.type === "message" && result.message.role === "toolResult" && result.message.details).toMatchObject(includeActive === false ? { hits: 0, skippedActive: 1 } : { hits: 1, skippedActive: 0 });
+        const resultText = JSON.stringify(result);
+        expect(resultText.includes("already in your active context")).toBe(false);
+        if (includeActive === false) expect(resultText.includes("canonical session projection")).toBe(true);
+      } finally {
+        session.dispose();
+      }
+    });
+  }
 
   test("guidance is added as a structured system prompt section, not a forced prompt", async () => {
     const { session, seen } = await host((s) => [record(s, fauxAssistantMessage("ok"))]);

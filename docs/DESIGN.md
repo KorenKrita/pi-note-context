@@ -85,7 +85,7 @@ Allowlist of indexed entry kinds: user messages, assistant messages (text and to
 
 Query searches first exclude `issuingAssistantId(ctx)`: Pi journals the assistant before tools run, and its history arguments would otherwise match their own query. This applies even with `includeActive: true`, excludes sibling calls/text in that one entry, and does not change id reads or listing. Older assistant entries remain indexed.
 
-Search excludes entries whose full indexed text already appears in `buildSessionProjection()` and reports the skipped count; `includeActive: true` overrides this. This accounts for retained tails across windows and persisted context edits, while plain notebook records (not model-visible) remain searchable. Other extensions’ request-local context filters are not reflected in the canonical projection. Search `offset` counts filtered, ranked hits; all other options must stay unchanged across pages. Empty queries/arrays/array members are rejected; spaces and regex punctuation stay literal. Read-by-id and listing do not apply search ranking or active-context exclusion.
+Search includes active entries by default (`includeActive: true`). Explicit `includeActive: false` excludes entries whose full indexed text appears in `buildSessionProjection()` and reports the skipped count as a canonical-projection heuristic, never as proof of model visibility. Retained tails and persisted context edits are accounted for; plain notebook records remain searchable. Pi 1.4's `emitContext` chains handlers in load order: this extension sees earlier handlers' replacements (e.g. SoL-Pi when loaded first), but not later handlers' changes or the subsequent `context_with_system` phase. Caching this hook's last messages therefore cannot establish final visibility. Defaulting to no exclusion is reliable in either load order and needs no request snapshot/lifecycle state. Search `offset` counts filtered, ranked hits; all other options must stay unchanged across pages. Empty queries/arrays/array members are rejected; spaces and regex punctuation stay literal. Read-by-id and listing do not apply search ranking or active-context exclusion.
 
 Output is bounded by a character budget with pagination.
 
@@ -163,7 +163,7 @@ w1 [history entry=…] <index line>
 [history entry=…] user: <verbatim or bounded excerpt>
 ...
 
-Continue with the notebook's Next action. Before investigating, evaluating or recommending something, check `history` for an earlier result on that topic (an entry from the index above, or a query on its key term) and build on it instead of redoing the work.
+Outside idle notebook tidy, continue with the notebook's Next action; idle tidy must end without resuming work. Before investigating, evaluating or recommending something, check `history` for an earlier result on that topic (an entry from the index above, or a query on its key term) and build on it instead of redoing the work.
 ```
 
 5. Return `{ compaction: { summary, firstKeptEntryId, tokensBefore, details: { windowNumber, notebookRevision, reason } } }`.

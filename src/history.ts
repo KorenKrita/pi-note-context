@@ -99,7 +99,7 @@ function toItem(e: SessionEntry, window: number): HistoryItem | null {
   }
 }
 
-/** IDs whose full indexed text is already visible in Pi's canonical context projection.
+/** IDs whose full indexed text appears in Pi's canonical session projection (not a visibility guarantee).
  * Plain notebook records and omitted/replaced context-edit targets are not assumed visible.
  * Request-local transformations by other extensions are outside this projection.
  */
@@ -155,7 +155,7 @@ export interface SearchOptions {
   query: string | string[];
   /** Direction within each priority group. Default oldest for backward compatibility. */
   from?: "oldest" | "newest";
-  /** Internal projection-derived exclusion set; omitted when includeActive is true. */
+  /** Internal projection-derived exclusion set; used only for explicit includeActive:false. */
   activeIds?: ReadonlySet<string>;
   window?: number;
   limit?: number;
@@ -267,7 +267,7 @@ export function list(items: readonly HistoryItem[], opts: ListOptions = {}): { i
 
 export function renderSearch(r: SearchResult, opts: SearchOptions): string {
   const off = opts.offset ?? 0;
-  const head = `history search ${JSON.stringify(opts.query)}${opts.window !== undefined ? ` window #${opts.window}` : ""}: ${r.hits.length} hit${r.hits.length === 1 ? "" : "s"}${off ? ` (from #${off + 1})` : ""} in ${r.scanned} entries (original content first; ${opts.from ?? "oldest"} first within each group)${r.truncated ? ` — more hits: repeat with offset: ${off + r.hits.length}` : ""}${r.skippedActive ? `\nSkipped ${r.skippedActive} matching entries already in your active context; includeActive: true searches them too.` : ""}`;
+  const head = `history search ${JSON.stringify(opts.query)}${opts.window !== undefined ? ` window #${opts.window}` : ""}: ${r.hits.length} hit${r.hits.length === 1 ? "" : "s"}${off ? ` (from #${off + 1})` : ""} in ${r.scanned} entries (original content first; ${opts.from ?? "oldest"} first within each group)${r.truncated ? ` — more hits: repeat with offset: ${off + r.hits.length}` : ""}${r.skippedActive ? `\nSkipped ${r.skippedActive} matching entries present in Pi's canonical session projection (includeActive: false). Request-local extensions may hide their originals; includeActive: true searches them too.` : ""}`;
   if (r.hits.length === 0) return head;
   const lines = r.hits.map((h) => `- [history entry=${h.id}] w${h.window} ${h.role} · ${h.label}\n  ${h.snippet}${h.moreMatches ? ` (+${h.moreMatches} more)` : ""}`);
   return `${head}\n${lines.join("\n")}`;

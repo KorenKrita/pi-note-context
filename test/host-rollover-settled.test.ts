@@ -330,10 +330,11 @@ describe("idle tidy hook policy", () => {
 });
 
 describe("history tool wiring", () => {
-  test("search defaults to excluding visible messages; includeActive overrides it and id stays unchanged", async () => {
+  test("search includes originals by default; explicit includeActive:false opts into canonical filtering", async () => {
     const h = harness({ jevEnabled: false });
-    expect(await h.history({ query: "nested comments" })).toContain("0 hits");
-    expect(await h.history({ query: "nested comments" })).toContain("Skipped 1");
+    expect(await h.history({ query: "nested comments" })).toContain("[history entry=u1]");
+    expect(await h.history({ query: "nested comments", includeActive: false })).toContain("0 hits");
+    expect(await h.history({ query: "nested comments", includeActive: false })).toContain("Skipped 1");
     expect(await h.history({ query: ["NESTED COMMENTS", "absent"], includeActive: true, from: "newest" })).toContain("[history entry=u1]");
     expect(await h.history({ id: "u1", context: 0 })).toContain("Refactor the parser");
     await expect(h.history({ query: [] })).rejects.toThrow("non-empty");
