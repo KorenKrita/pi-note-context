@@ -91,6 +91,9 @@ export function parseConfig(raw: unknown): Config {
       enabled: typeof r["jevEnabled"] === "boolean" ? r["jevEnabled"] : DEFAULT_JEV.enabled,
       timeoutMs: num(r["jevTimeoutMs"], DEFAULT_JEV.timeoutMs, 500),
       unrecordedThreshold: typeof r["jevUnrecordedThreshold"] === "number" && r["jevUnrecordedThreshold"] > 0 && r["jevUnrecordedThreshold"] <= 1 ? r["jevUnrecordedThreshold"] : DEFAULT_JEV.unrecordedThreshold,
+      model: typeof r["jevModel"] === "string" && r["jevModel"] ? r["jevModel"] : DEFAULT_JEV.model,
+      ...(typeof r["jevBaseUrl"] === "string" && r["jevBaseUrl"] ? { baseUrl: r["jevBaseUrl"] } : {}),
+      ...(typeof r["jevApiKey"] === "string" && r["jevApiKey"] ? { apiKey: r["jevApiKey"] } : {}),
     },
   };
 }

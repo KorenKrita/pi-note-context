@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { classifyUserMessage, DEFAULT_JEV, JEV_STATE_MAX_CHARS, unrecordedDecisionProbability, type UserKind } from "../src/jev.ts";
+import { classifyUserMessage, DEFAULT_JEV, JEV_STATE_MAX_CHARS, resolveApiKey, unrecordedDecisionProbability, type UserKind } from "../src/jev.ts";
 import { extractFacts, indexText, pinUserMessages, renderRolloverSummary } from "../src/rollover.ts";
 import { reconstructNotebook } from "../src/notebook.ts";
 import { assistant, notebookEntry, toolResult, user } from "./fixtures.ts";
@@ -101,6 +101,29 @@ describe("Jev calls", () => {
     });
     expect(await classifyUserMessage(late, { ...DEFAULT_JEV, timeoutMs: 20 }, "x")).toBeNull(); // ignores the abort: the deadline still wins
     expect(await classifyUserMessage(ctxWith({ findOfType: () => { throw new Error("boom"); }, classify: async () => ({}) }), DEFAULT_JEV, "x")).toBeNull();
+  });
+
+  test("model and apiKey reach the registry; a baseUrl calls the typesafe provider directly with the registry model as template", async () => {
+    const decide = { stopReason: "stop", answers: { kind: { type: "choice", choice: "decide", probabilities: {} } } };
+    const seen: unknown[] = [];
+    const registry = {
+      findOfType: (_t: string, p: string, id: string) => (seen.push(["find", p, id]), { id, provider: p, baseUrl: "http://registry", cost: {} }),
+      classify: async (m: unknown, _c: unknown, o: Record<string, unknown>) => (seen.push(["registry", (m as { id: string }).id, o["apiKey"]]), decide),
+      getProvider: (id: string) => ({ classify: async (m: unknown, _c: unknown, o: Record<string, unknown>) => (seen.push(["provider", id, m, o["apiKey"]]), decide) }),
+    };
+    process.env["NC_TEST_KEY"] = "from-env";
+    try {
+      expect(await classifyUserMessage(ctxWith(registry), { ...DEFAULT_JEV, model: "jev-x", apiKey: "$NC_TEST_KEY" }, "x")).toBe("decide");
+      expect(seen).toEqual([["find", "typesafe", "jev-x"], ["registry", "jev-x", "from-env"]]);
+      seen.length = 0;
+      expect(await classifyUserMessage(ctxWith(registry), { ...DEFAULT_JEV, model: "jev-x", baseUrl: "http://custom/v1", apiKey: "k" }, "x")).toBe("decide");
+      expect(seen[1]).toEqual(["provider", "typesafe", { id: "jev-x", provider: "typesafe", baseUrl: "http://custom/v1", cost: {} }, "k"]);
+      const { getProvider: _drop, ...noProvider } = registry;
+      expect(await classifyUserMessage(ctxWith(noProvider), { ...DEFAULT_JEV, baseUrl: "http://custom/v1" }, "x")).toBeNull();
+    } finally {
+      delete process.env["NC_TEST_KEY"];
+    }
+    expect(resolveApiKey("$NC_MISSING")).toBeUndefined();
   });
 
   test("unrecordedDecisionProbability keeps the newest messages within the state budget", async () => {

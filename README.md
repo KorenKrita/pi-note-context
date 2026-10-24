@@ -47,7 +47,10 @@ Optional `~/.pi/agent/pi-note-context.json` (global only; every field optional):
   "noNotesStepTokens": 40000,
   "jevEnabled": true,
   "jevTimeoutMs": 5000,
-  "jevUnrecordedThreshold": 0.8
+  "jevUnrecordedThreshold": 0.8,
+  "jevModel": "jev-latest",
+  "jevBaseUrl": "",
+  "jevApiKey": ""
 }
 ```
 
@@ -63,7 +66,9 @@ The one-per-window reminder (from the reminder threshold) likewise carries no co
 
 `sessionIndexMaxTokens` (default 3072): budget for the rollover summary's index of earlier user messages — one line per message (`w3 [history entry=…] …`, ~80 chars; attachments, quotes, fenced code and pasted log lines collapse to tags like `[file: x]`, `[log 40 lines]`). Over budget, lines shorten to ~40 chars, then the oldest are dropped behind a count line. It tells a fresh window what the session already worked on, so the model checks `history` before redoing an investigation.
 
-`jevEnabled` (default `true`): use TypeSafe's Jev classifier (`typesafe/jev-latest`, Pi ≥ 1.x classifier API) in the background. Each user message in the active context is classified once as decision, approval, information, question or complaint. Rollover pinning then keeps decisions longer (4× `pinnedMessageMaxChars`), attaches the tail of the assistant text an approval answers, collapses complaints to their first line, and over budget collapses informational messages before decisions. An approval is sent to Jev with the tail of the assistant proposal it answers. Delegated-task notifications always pin as one line (`[subagent result] <title> [<status>]`), with or without Jev. When a decision or approval arrives after the latest notes write, Jev is asked whether the notebook misses it; at or above `jevUnrecordedThreshold` the next tool result carries `a recent user decision may be missing from the notes — record it if so`, once per notebook record. Requests are trimmed to 20K characters (Jev rejects inputs above about 32K tokens). Every call fails open after `jevTimeoutMs`: no Jev, an error or a timeout leaves the mechanical rules in place.
+`jevEnabled` (default `true`): use TypeSafe's Jev classifier (`typesafe/jev-latest`, Pi ≥ 1.x classifier API) in the background. Each user message in the active context is classified once as decision, approval, information, question or complaint. Rollover pinning then keeps decisions longer (4× `pinnedMessageMaxChars`), attaches the tail of the assistant text an approval answers, collapses complaints to their first line, and over budget collapses informational messages before decisions. An approval is sent to Jev with the tail of the assistant proposal it answers. Delegated-task notifications always pin as one line (`[subagent result] <title> [<status>]`), with or without Jev. When a decision or approval arrives after the latest notes write, Jev is asked whether the notebook misses it; at or above `jevUnrecordedThreshold` the next tool result carries `a recent user decision may be missing from the notes — record it if so`, once per notebook record. Requests are trimmed to 24K characters (Jev rejects inputs above about 32K tokens). Every call fails open after `jevTimeoutMs`: no Jev, an error or a timeout leaves the mechanical rules in place.
+
+Jev endpoint: by default the classifier is Pi's `typesafe/<jevModel>` and uses that provider's URL and key; `jevApiKey` alone overrides the key. Setting `jevBaseUrl` (e.g. `https://api.typesafe.ai/v1` or a local proxy such as `http://127.0.0.1:8317/v0/management/v1`) calls the TypeSafe API there directly, with `jevApiKey` — Pi's provider URL would otherwise override it. `jevApiKey` may be `$NAME` to read the environment variable NAME.
 
 The rollover summary also lists mechanical facts from the dropped range: files changed by edit tools, commits seen in the output of bash calls that run git (a quiet `git commit -q` prints nothing and is missed), and answers given through `ask_user_question`.
 
