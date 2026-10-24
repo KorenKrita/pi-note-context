@@ -6,7 +6,7 @@
  * toolResult, compaction summaries, branch summaries, this plugin's own
  * notebook and rollover entries. Excluded: bashExecution with
  * excludeFromContext, other extensions' custom entries and custom messages,
- * provider-opaque state, and results of the `history` tool itself.
+ * provider-opaque state, and calls/results of the `history` tool itself.
  */
 
 import type { SessionEntry, SessionProjection } from "@earendil-works/pi-coding-agent";
@@ -64,7 +64,8 @@ function toItem(e: SessionEntry, window: number): HistoryItem | null {
           const parts: string[] = [];
           for (const c of m.content) {
             if (c.type === "text") parts.push(c.text);
-            else if (c.type === "toolCall") parts.push(`${c.name}(${fullJson(c.arguments)})`);
+            // Indexing history queries makes each page add hits ahead of the next offset.
+            else if (c.type === "toolCall" && c.name !== HISTORY_TOOL_NAME) parts.push(`${c.name}(${fullJson(c.arguments)})`);
             // thinking blocks intentionally excluded
           }
           const text = parts.join("\n");

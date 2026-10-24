@@ -63,6 +63,22 @@ describe("indexBranch allowlist", () => {
     expect(all).toContain('read({"path":"src/p.ts"})');
   });
 
+  test("history call blocks are not indexed, while assistant text and sibling tools remain", () => {
+    const mixed = assistant("mixed", "original conclusion", { name: "history", args: { query: "query-only-marker" } });
+    if (mixed.type === "message" && mixed.message.role === "assistant") mixed.message.content.push(
+      { type: "toolCall", id: "c2", name: "read", arguments: { path: "sibling-marker.ts" } },
+      { type: "toolCall", id: "c3", name: "history", arguments: { id: "history-id-only-marker" } },
+    );
+    const before = structuredClone(mixed);
+    const items = indexBranch([mixed, assistant("pure", "", { name: "history", args: { query: "query-only-marker" } }), toolResult("result", "history", "result-only-marker")]);
+    expect(search(items, { query: ["query-only-marker", "history-id-only-marker", "result-only-marker"] }).hits).toEqual([]);
+    expect(search(items, { query: "original conclusion" }).hits.map((h) => h.id)).toEqual(["mixed"]);
+    expect(search(items, { query: "sibling-marker" }).hits.map((h) => h.id)).toEqual(["mixed"]);
+    expect(read(items, "mixed", 0)?.target.text).toBe('original conclusion\nread({"path":"sibling-marker.ts"})');
+    expect(list(items).items.find((i) => i.id === "mixed")?.label).toBe("original conclusion");
+    expect(mixed).toEqual(before); // journal remains intact
+  });
+
   test("window numbers advance only at this plugin's rollover compactions", () => {
     const branch: SessionEntry[] = [user("u1", "a"), plainCompaction("c1"), user("u2", "b"), rollover("r1"), user("u3", "c")];
     const items = indexBranch(branch);

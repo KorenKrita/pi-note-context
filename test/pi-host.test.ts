@@ -201,6 +201,33 @@ describe("Pi host integration", () => {
     }
   });
 
+  test.each([undefined, false, true])("history pages reach old entries as Pi journals each call/result (includeActive=%s)", async (includeActive) => {
+    const { session, sessionManager } = await host((s) => [
+      ...Array.from({ length: 4 }, (_, offset) => record(s, fauxAssistantMessage(fauxToolCall("history", {
+        query: "needle", from: "newest", limit: 1, offset, ...(includeActive === undefined ? {} : { includeActive }),
+      }), { stopReason: "toolUse" }))),
+      record(s, fauxAssistantMessage("Search complete.")),
+    ], { jevEnabled: false });
+    try {
+      const append = (text: string) => sessionManager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
+      const oldest = append("needle oldest answer");
+      const old = append("needle historical answer");
+      const active = append("Find needle");
+      sessionManager.appendCompaction("Earlier work", active, 100);
+      await session.prompt("Search the journal one result at a time.");
+      await session.waitForIdle();
+      const pages = sessionManager.getBranch().flatMap((e) => {
+        if (e.type !== "message" || e.message.role !== "toolResult" || e.message.toolName !== "history") return [];
+        const text = e.message.content.map((c) => c.type === "text" ? c.text : "").join("\n");
+        return [[...text.matchAll(/^- \[history entry=([^\]]+)\]/gm)].map((m) => m[1]!)];
+      });
+      expect(pages).toEqual(includeActive === false ? [[old], [oldest], [], []] : [[active], [old], [oldest], []]);
+      expect(new Set(pages.flat()).size).toBe(pages.flat().length);
+    } finally {
+      session.dispose();
+    }
+  });
+
   for (const [phase, placement] of [["context", "before"], ["context", "after"], ["context_with_system", "before"]] as const) {
     test.each([undefined, true, false])(`history can recover request-local replacements (${phase}, ${placement}, includeActive=%s)`, async (includeActive) => {
       const replaceOutput: ExtensionFactory = (pi) => {

@@ -15,7 +15,7 @@ import { flushLedger } from "../src/ledger.ts";
 import { ROLLOVER_DETAILS_KIND } from "../src/history.ts";
 import { IDLE_TIDY_CUSTOM_TYPE } from "../src/idle-tidy.ts";
 import { withIdleTimers } from "./idle-timer.ts";
-import { notebookEntry, rolloverEntry, round, user } from "./fixtures.ts";
+import { assistant, notebookEntry, rolloverEntry, round, toolResult, user } from "./fixtures.ts";
 
 // One OS temp root per run; each harness gets its own agent dir under it so config and ledger
 // are isolated per test. Left in place after the run (OS temp cleanup owns it).
@@ -421,6 +421,33 @@ describe("idle tidy hook policy", () => {
 });
 
 describe("history tool wiring", () => {
+  for (const hideCalls of [false, true]) {
+    test.each([undefined, false, true])(`paging with journaled history calls/results stays stable (hideCalls=${hideCalls}, includeActive=%s)`, async (includeActive) => {
+      const h = harness({ jevEnabled: false });
+      h.branch.splice(0, h.branch.length,
+        user("oldest", "needle oldest answer"), user("old", "needle historical answer"),
+        user("active", "Find needle"), rolloverEntry("r2", "active", 2));
+      const expected = includeActive === false ? ["old", "oldest"] : ["active", "old", "oldest"];
+      const found: string[] = [];
+      const pages: string[][] = [];
+      for (let offset = 0; offset <= expected.length; offset++) {
+        const params = { query: "needle", from: "newest", limit: 1, offset, ...(includeActive === undefined ? {} : { includeActive }) };
+        const id = `query-${offset}`;
+        h.branch.push(assistant(id, "", [{ id: `call-${offset}`, name: "history", args: params }]));
+        const result = await h.history(params);
+        const hits = [...result.matchAll(/^- \[history entry=([^\]]+)\]/gm)].map((m) => m[1]!);
+        pages.push(hits);
+        found.push(...hits);
+        h.branch.push(toolResult(`result-${offset}`, `call-${offset}`, "history", result));
+        if (hideCalls) h.branch.push({ type: "context_edit", id: `hide-${offset}`, parentId: null, timestamp: new Date().toISOString(), targetId: id, replacement: null });
+      }
+      expect(pages).toEqual([...expected.map((id) => [id]), []]);
+      expect(found).toEqual(expected);
+      expect(new Set(found).size).toBe(found.length);
+      expect(found).toContain("oldest");
+    });
+  }
+
   test("search includes originals by default; explicit includeActive:false opts into canonical filtering", async () => {
     const h = harness({ jevEnabled: false });
     expect(await h.history({ query: "nested comments" })).toContain("[history entry=u1]");

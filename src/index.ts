@@ -374,8 +374,8 @@ export default function noteContext(pi: ExtensionAPI): void {
       }
       if (params.query !== undefined) {
         const opts = { query: params.query, window: params.window, limit: params.limit, offset: params.offset, from: params.from, activeIds: params.includeActive === false ? activeHistoryIds(ctx.sessionManager.buildSessionProjection()) : undefined };
-        // The issuing message is already journaled and contains this query in its tool arguments.
-        // Exclude the whole entry before searching/counting, even with includeActive:true.
+        // History arguments are never indexed; still exclude the issuing entry's text/sibling
+        // calls before searching/counting, even with includeActive:true (they may echo the query).
         const selfId = issuingAssistantId(ctx);
         const r = search(items.filter((item) => item.id !== selfId), opts);
         appendLedger({ kind: "history", session: sessionId(ctx), window, mode: "search", hits: r.hits.length, turnsSinceRollover: since });
