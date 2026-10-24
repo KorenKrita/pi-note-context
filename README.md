@@ -44,7 +44,10 @@ Optional `~/.pi/agent/pi-note-context.json` (global only; every field optional):
   "budgetTokens": 400000,
   "fallbackBudgetTokens": 400000,
   "statusStepTokens": 40000,
-  "noNotesStepTokens": 40000
+  "noNotesStepTokens": 40000,
+  "jevEnabled": true,
+  "jevTimeoutMs": 5000,
+  "jevUnrecordedThreshold": 0.8
 }
 ```
 
@@ -59,6 +62,10 @@ The one-per-window reminder (from the reminder threshold) likewise carries no co
 `autoRollover` (default `true`): after a notes write that passes the gate, the host schedules the rollover itself — the model does not need to call `new_context`. The host only does this from the reminder threshold on; below it the model must call `new_context` itself. The same gate runs again when the turn settles; if it no longer passes (unreviewed work would be dropped, pressure fell below the floor, the model changed to an external compaction owner) the schedule is cancelled (ledger `rollover_cancelled` with the blocker) rather than handed to Pi's LLM summary, and the next notes write re-arms it. A run the user aborts (ESC) also cancels a pending host or model schedule (`why: "user_abort"`): no compaction and no continuation turn; only an explicit `userRequested` rollover survives the abort.
 
 `sessionIndexMaxTokens` (default 3072): budget for the rollover summary's index of earlier user messages — one line per message (`w3 [history entry=…] …`, ~80 chars; attachments, quotes, fenced code and pasted log lines collapse to tags like `[file: x]`, `[log 40 lines]`). Over budget, lines shorten to ~40 chars, then the oldest are dropped behind a count line. It tells a fresh window what the session already worked on, so the model checks `history` before redoing an investigation.
+
+`jevEnabled` (default `true`): use TypeSafe's Jev classifier (`typesafe/jev-latest`, Pi ≥ 1.x classifier API) in the background. Each user message in the active context is classified once as decision, approval, information, question or complaint. Rollover pinning then keeps decisions longer (4× `pinnedMessageMaxChars`), attaches the tail of the assistant text an approval answers, collapses complaints to their first line, and over budget collapses informational messages before decisions. An approval is sent to Jev with the tail of the assistant proposal it answers. Delegated-task notifications always pin as one line (`[subagent result] <title> [<status>]`), with or without Jev. When a decision or approval arrives after the latest notes write, Jev is asked whether the notebook misses it; at or above `jevUnrecordedThreshold` the next tool result carries `a recent user decision may be missing from the notes — record it if so`, once per notebook record. Requests are trimmed to 20K characters (Jev rejects inputs above about 32K tokens). Every call fails open after `jevTimeoutMs`: no Jev, an error or a timeout leaves the mechanical rules in place.
+
+The rollover summary also lists mechanical facts from the dropped range: files changed by edit tools, commits seen in the output of bash calls that run git (a quiet `git commit -q` prints nothing and is missed), and answers given through `ask_user_question`.
 
 `externalCompactionModels` lists `provider/model` ids whose compaction is owned by another extension (e.g. remote Codex compaction); this plugin then yields the summary step for those models but keeps notes, history, reminders and the status line.
 

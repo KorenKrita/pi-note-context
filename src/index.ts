@@ -23,8 +23,9 @@ import { appendLedger, flushLedger } from "./ledger.ts";
 import { maintenanceRequestText, reminderText, reminderThreshold, step, zoneFor, type MaintenanceState, type Thresholds } from "./maintenance.ts";
 import { applySections, makeRecord, NOTEBOOK_ENTRY_TYPE, reconstructNotebook, renderNotebook, type Notebook } from "./notebook.ts";
 import { estimateTokens as estimateText } from "./notebook.ts";
-import { droppedRange, indexUserMessages, makeDetails, pinUserMessages, renderRolloverSummary, type RolloverReason } from "./rollover.ts";
-import { appendSuffixPatch, renderStatusLine, StatusOdometer, tokensSinceReview, turnsSince } from "./status.ts";
+import { droppedRange, extractFacts, indexUserMessages, makeDetails, pinUserMessages, renderRolloverSummary, userText, type RolloverReason } from "./rollover.ts";
+import { classifyUserMessage, unrecordedDecisionProbability, type UserKind } from "./jev.ts";
+import { appendSuffixPatch, isStale, renderStatusLine, StatusOdometer, tokensSinceReview, turnsSince } from "./status.ts";
 import { addTrailers, buildIdIndex } from "./trailers.ts";
 
 type ToolOut = { content: { type: "text"; text: string }[]; details: Record<string, unknown> };
@@ -83,6 +84,15 @@ export default function noteContext(pi: ExtensionAPI): void {
   let lastCompactionWasOurs = false;
   let cacheAcc = { calls: 0, cacheRead: 0, input: 0 }; // provider cache stats for the current window
   const statusOdometer = new StatusOdometer();
+  /** Jev kinds by user entry id. Entry ids are stable, so this survives window and branch changes. */
+  const kinds = new Map<string, UserKind>();
+  const classifying = new Set<string>();
+  const jevQueue: { id: string; text: string }[] = [];
+  let jevConsumers = 0;
+  const jevFailures = new Map<string, number>();
+  const JEV_ATTEMPTS = 2;
+  /** Notebook record Jev found missing a user decision, and whether the status line has said so. */
+  let unrecorded: { entryId: string | null; shown: boolean } | null = null;
 
   const resetVolatile = () => {
     branchChangedPending = false;
@@ -96,6 +106,7 @@ export default function noteContext(pi: ExtensionAPI): void {
     lastCompactionWasOurs = false;
     cacheAcc = { calls: 0, cacheRead: 0, input: 0 };
     statusOdometer.reset();
+    unrecorded = null;
   };
 
   // ------------------------------------------------------------------ helpers
@@ -170,13 +181,87 @@ export default function noteContext(pi: ExtensionAPI): void {
     return null;
   }
 
+  /**
+   * Classify unclassified user messages in the active context with Jev in the background, through
+   * one shared queue with two consumers. A decision or approval newer than the notebook record
+   * then asks Jev whether the notes miss it. Until a result lands the mechanical rules apply.
+   * A message whose classification fails is retried on a later scan, at most JEV_ATTEMPTS times.
+   */
+  function classifyPending(ctx: ExtensionContext): void {
+    if (!config.jev.enabled) return;
+    for (const e of contextOf(ctx)) {
+      const t = userText(e);
+      if (t === null || t.trim() === "" || kinds.has(e.id) || classifying.has(e.id) || /^Delegated task \S+ /.test(t.trimStart())) continue;
+      if ((jevFailures.get(e.id) ?? 0) >= JEV_ATTEMPTS) continue;
+      classifying.add(e.id);
+      jevQueue.push({ id: e.id, text: t });
+    }
+    while (jevConsumers < 2 && jevQueue.length > 0) {
+      jevConsumers++;
+      void (async () => {
+        try {
+          for (let item = jevQueue.shift(); item; item = jevQueue.shift()) {
+            const kind = await classifyUserMessage(ctx, config.jev, item.text);
+            classifying.delete(item.id);
+            if (!kind) {
+              jevFailures.set(item.id, (jevFailures.get(item.id) ?? 0) + 1);
+              continue;
+            }
+            kinds.set(item.id, kind);
+            if (kind === "decide" || kind === "ack") await checkUnrecorded(ctx);
+          }
+        } catch {
+          // a replaced session's stale ctx throws; the next scan starts fresh consumers
+        } finally {
+          jevConsumers--;
+        }
+      })();
+    }
+  }
+
+  /** The tail of the last assistant text before `index` on the branch: what an approval answers. */
+  function answeredProposal(branch: readonly SessionEntry[], index: number): string | null {
+    for (let i = index - 1; i >= 0; i--) {
+      const e = branch[i]!;
+      if (e.type !== "message" || e.message.role !== "assistant") continue;
+      const t = e.message.content.map((p) => (p.type === "text" ? p.text : "")).join("\n").trim();
+      if (t) return t.length > 300 ? `…${t.slice(t.length - 300)}` : t;
+    }
+    return null;
+  }
+
+  async function checkUnrecorded(ctx: ExtensionContext): Promise<void> {
+    const branch = branchOf(ctx);
+    const notebook = reconstructNotebook(branch);
+    if (notebook.revision === 0 || unrecorded?.entryId === notebook.entryId) return;
+    const at = branch.findIndex((e) => e.id === notebook.entryId);
+    const messages: string[] = [];
+    for (let i = at + 1; i < branch.length; i++) {
+      const e = branch[i]!;
+      const kind = kinds.get(e.id);
+      if (kind === "decide") messages.push(userText(e)!);
+      if (kind === "ack") {
+        const proposal = answeredProposal(branch, i);
+        messages.push(proposal ? `(assistant proposed: ${proposal.replace(/\s+/g, " ")}) ${userText(e)!}` : userText(e)!);
+      }
+    }
+    if (messages.length === 0) return;
+    const p = await unrecordedDecisionProbability(ctx, config.jev, renderNotebook(notebook.sections), messages);
+    // Another check may have flagged (and shown) this record meanwhile: never move it back to unshown.
+    if (unrecorded?.entryId === notebook.entryId) return;
+    if (p !== null && p >= config.jev.unrecordedThreshold && reconstructNotebook(branchOf(ctx)).entryId === notebook.entryId) {
+      unrecorded = { entryId: notebook.entryId, shown: false };
+    }
+  }
+
   function summaryTokenEstimate(ctx: ExtensionContext, notebook: Notebook): number {
     const context = contextOf(ctx);
     const cut = projectCut(context, compactionSettings(ctx).keepRecentTokens);
-    const pinned = cut.firstKeptEntryId ? pinUserMessages(droppedRange(context, cut.firstKeptEntryId), config.pin) : [];
+    const dropped = cut.firstKeptEntryId ? droppedRange(context, cut.firstKeptEntryId) : [];
+    const pinned = pinUserMessages(dropped, config.pin, kinds);
     const branch = branchOf(ctx);
     const index = indexUserMessages(branch, cut.firstKeptEntryId, new Set(pinned.map((p) => p.id)), config.pin);
-    return estimateText(renderRolloverSummary({ window: currentWindow(branch) + 1, reason: "model", notebook, pinned, index }));
+    return estimateText(renderRolloverSummary({ window: currentWindow(branch) + 1, reason: "model", notebook, pinned, index, facts: extractFacts(dropped) }));
   }
 
   /** Freshness against a concrete cut: true when nothing that will be dropped post-dates the notebook's review marker. */
@@ -441,7 +526,8 @@ export default function noteContext(pi: ExtensionAPI): void {
       appendLedger({ kind: "rollover_declined", session: sessionId(ctx), window, why: "stale_notebook_at_cut" });
       return null;
     }
-    const pinned = pinUserMessages(droppedRange(context, firstKeptEntryId), config.pin);
+    const dropped = droppedRange(context, firstKeptEntryId);
+    const pinned = pinUserMessages(dropped, config.pin, kinds);
     const index = indexUserMessages(branch, firstKeptEntryId, new Set(pinned.map((p) => p.id)), config.pin);
     const session = sessionId(ctx);
     const record = () => {
@@ -451,7 +537,7 @@ export default function noteContext(pi: ExtensionAPI): void {
         cacheAcc = { calls: 0, cacheRead: 0, input: 0 };
       }
     };
-    return { summary: renderRolloverSummary({ window: window + 1, reason, notebook, pinned, index }), details: makeDetails(window + 1, reason, notebook, pinned), record };
+    return { summary: renderRolloverSummary({ window: window + 1, reason, notebook, pinned, index, facts: extractFacts(dropped) }), details: makeDetails(window + 1, reason, notebook, pinned), record };
   }
 
   /** Volatile state for a freshly opened window. */
@@ -580,7 +666,8 @@ export default function noteContext(pi: ExtensionAPI): void {
     return true;
   }
 
-  pi.on("agent_start", async () => {
+  pi.on("agent_start", async (_event, ctx) => {
+    classifyPending(ctx);
     runAborted = false;
   });
   pi.on("agent_end", async (_event, ctx) => {
@@ -661,6 +748,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   }
 
   pi.on("turn_end", async (event, ctx) => {
+    classifyPending(ctx);
     if (ctx.signal?.aborted) runAborted = true;
     // Fallback rollover: the maintenance checkpoint landed in this turn's notes call. Roll over
     // here, inside the run, so the model continues in the new window without an abort.
@@ -766,12 +854,15 @@ export default function noteContext(pi: ExtensionAPI): void {
     const reviewedEarlier = at >= 0 && branch.slice(at + 1).some((e) => e.type === "compaction");
     const since = tokensSinceReview(usage, notebook, reviewedEarlier ? base : null);
     if (branchChangedPending) statusOdometer.force();
-    const reading = statusOdometer.reading(notebook.revision === 0 ? config.noNotesStepTokens : config.statusStepTokens, since, notebook, externalOwner(ctx));
+    const unrecordedDue = unrecorded !== null && !unrecorded.shown && unrecorded.entryId === notebook.entryId;
+    const reading = statusOdometer.reading(notebook.revision === 0 ? config.noNotesStepTokens : config.statusStepTokens, since, notebook, externalOwner(ctx))
+      ?? (unrecordedDue ? { stale: isStale(notebook.revision === 0 ? config.noNotesStepTokens : config.statusStepTokens, since, notebook), branchChanged: false, externalCompaction: false, staleStep: null } : undefined);
     if (!reading) return undefined;
-    const line = renderStatusLine({ notebook, stale: reading.stale, branchChanged: reading.branchChanged, externalCompaction: reading.externalCompaction });
+    const line = renderStatusLine({ notebook, stale: reading.stale, branchChanged: reading.branchChanged, externalCompaction: reading.externalCompaction, unrecordedDecision: unrecordedDue });
     const patch = appendSuffixPatch(event.content, line);
     if (!patch) return undefined; // no text part to carry it: stay armed for the next result
     statusOdometer.confirm(reading, notebook);
+    if (unrecordedDue) unrecorded!.shown = true;
     branchChangedPending = false;
     return patch;
   });
@@ -779,7 +870,9 @@ export default function noteContext(pi: ExtensionAPI): void {
   // Provider cache statistics are accumulated in memory and written as ONE row per
   // window at rollover (see session_before_compact). A per-call row carried no
   // behavioural information and outnumbered every other ledger kind 20:1.
-  pi.on("message_end", async (event) => {
+  pi.on("message_end", async (event, ctx) => {
+    // Pi appends the entry after every message_end handler returns. The ctx is stale if the session was replaced meanwhile.
+    if (event.message.role === "user") setTimeout(() => { try { classifyPending(ctx); } catch { /* stale ctx */ } }, 0);
     if (event.message.role !== "assistant") return undefined;
     const u = event.message.usage;
     if (u && (u.cacheRead > 0 || u.input > 0)) {

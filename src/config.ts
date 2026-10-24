@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_LIMITS, type NotebookLimits } from "./notebook.ts";
 import { DEFAULT_PIN, type PinOptions } from "./rollover.ts";
+import { DEFAULT_JEV, type JevOptions } from "./jev.ts";
 
 export interface Config {
   enabled: boolean;
@@ -29,6 +30,8 @@ export interface Config {
   statusStepTokens: number;
   /** Step for the "no notes yet" nudge, measured on context size; defaults to statusStepTokens. */
   noNotesStepTokens: number;
+  /** Jev classifier: pins by message kind and flags user decisions the notes miss. Fails open to the mechanical rules. */
+  jev: JevOptions;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -46,6 +49,7 @@ export const DEFAULT_CONFIG: Config = {
   fallbackBudgetTokens: 400_000,
   statusStepTokens: 40_000,
   noNotesStepTokens: 40_000,
+  jev: DEFAULT_JEV,
 };
 
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
@@ -83,6 +87,11 @@ export function parseConfig(raw: unknown): Config {
     fallbackBudgetTokens: num(r["fallbackBudgetTokens"], budgetTokens, 32_000),
     statusStepTokens: num(r["statusStepTokens"], DEFAULT_CONFIG.statusStepTokens, 1_000),
     noNotesStepTokens: num(r["noNotesStepTokens"], num(r["statusStepTokens"], DEFAULT_CONFIG.statusStepTokens, 1_000), 1_000),
+    jev: {
+      enabled: typeof r["jevEnabled"] === "boolean" ? r["jevEnabled"] : DEFAULT_JEV.enabled,
+      timeoutMs: num(r["jevTimeoutMs"], DEFAULT_JEV.timeoutMs, 500),
+      unrecordedThreshold: typeof r["jevUnrecordedThreshold"] === "number" && r["jevUnrecordedThreshold"] > 0 && r["jevUnrecordedThreshold"] <= 1 ? r["jevUnrecordedThreshold"] : DEFAULT_JEV.unrecordedThreshold,
+    },
   };
 }
 

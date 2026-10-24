@@ -19,7 +19,7 @@ afterAll(() => {
 });
 let runs = 0;
 
-async function host(responses: (seen: TranscriptContext[]) => FauxResponseStep[], config: Record<string, unknown> = {}, contextWindow = 200_000, before: ExtensionFactory[] = []) {
+async function host(responses: (seen: TranscriptContext[]) => FauxResponseStep[], config: Record<string, unknown> = {}, contextWindow = 200_000, before: ExtensionFactory[] = [], classify?: (state: Record<string, unknown>, questions: Record<string, unknown>) => Record<string, unknown>) {
   const agentDir = join(tmpRoot, `agent-${++runs}`);
   mkdirSync(agentDir, { recursive: true });
   writeFileSync(join(agentDir, "pi-note-context.json"), JSON.stringify(config));
@@ -35,6 +35,16 @@ async function host(responses: (seen: TranscriptContext[]) => FauxResponseStep[]
     cwd: tmpRoot, agentDir, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     extensionFactories: [
       ...before,
+      // Pi ≥ 1.x classifier API on the registry extensions see; the pinned 0.87 registry lacks it.
+      ...(classify
+        ? [(pi: Parameters<ExtensionFactory>[0]) =>
+            pi.on("agent_start", (_e, ctx) => {
+              Object.assign(ctx.modelRegistry, {
+                findOfType: () => ({ id: "jev-latest" }),
+                classify: async (_m: unknown, c: { state: Record<string, unknown>; questions: Record<string, unknown> }) => ({ stopReason: "stop", answers: classify(c.state, c.questions) }),
+              });
+            })]
+        : []),
       noteContext,
       (pi) =>
         pi.registerTool({
@@ -126,6 +136,36 @@ describe("Pi host integration", () => {
     expect(compaction?.details?.reason).toBe("model");
   });
 
+  test("Jev flags a user decision the notes miss on the next tool result, once", async () => {
+    const asked: string[] = [];
+    const { session, seen } = await host(
+      (s) => [
+        record(s, fauxAssistantMessage(fauxToolCall("notes", { sections: { Task: "parser" } }), { stopReason: "toolUse" })),
+        record(s, fauxAssistantMessage("Noted.")),
+        record(s, fauxAssistantMessage(fauxToolCall("dump", {}), { stopReason: "toolUse" })),
+        record(s, fauxAssistantMessage(fauxToolCall("dump", {}), { stopReason: "toolUse" })),
+        record(s, fauxAssistantMessage("Done.")),
+      ],
+      {},
+      200_000,
+      [],
+      (state, questions) => {
+        if ("kind" in questions) {
+          asked.push(String(state["user_message"]));
+          return { kind: { type: "choice", choice: String(state["user_message"]).startsWith("From now on") ? "decide" : "ask", probabilities: {} } };
+        }
+        return { unrecorded: { type: "bool", probability: 0.95 } };
+      },
+    );
+    await session.prompt("What does the parser do?");
+    await session.prompt("From now on, keep the public API stable.");
+    await session.waitForIdle();
+    session.dispose();
+    expect(asked).toContain("From now on, keep the public API stable.");
+    const flag = "a recent user decision may be missing from the notes";
+    // Classification runs in the background (Jev takes 1–2 s), so the flag lands on a later tool result.
+    expect(text(seen[4]!).split(flag)).toHaveLength(2); // once per notebook record
+  });
   test("a second rollover indexes the first window's user messages", async () => {
     const { session, seen } = await host(
       (s) => [

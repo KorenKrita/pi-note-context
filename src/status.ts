@@ -22,6 +22,8 @@ export interface StatusInput {
   branchChanged?: boolean;
   /** Set (once per window) when compaction for the current model is owned by another extension. */
   externalCompaction?: boolean;
+  /** Set once per notebook record when Jev finds a user decision the notes do not record. */
+  unrecordedDecision?: boolean;
 }
 
 export function renderStatusLine(s: StatusInput): string {
@@ -29,6 +31,7 @@ export function renderStatusLine(s: StatusInput): string {
   if (s.notebook.revision === 0) parts.push("no notes yet — write them once there is working state worth keeping");
   else if (s.stale) parts.push(`notes rev ${s.notebook.revision} not reviewed for a while — update them, or call notes({reviewed:true}) if they are still accurate`);
   else parts.push(`notes rev ${s.notebook.revision}`);
+  if (s.unrecordedDecision) parts.push("a recent user decision may be missing from the notes — record it if so");
   if (s.externalCompaction) parts.push("compaction: external");
   if (s.branchChanged) parts.push("branch changed — verify workspace state");
   return `[note-context] ${parts.join(" · ")}`;

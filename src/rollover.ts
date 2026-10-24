@@ -7,6 +7,7 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { cutAt, isRolloverDetails, ROLLOVER_DETAILS_KIND } from "./history.ts";
 import { estimateTokens, renderNotebook, type Notebook } from "./notebook.ts";
+import type { UserKind } from "./jev.ts";
 
 export type RolloverReason = "model" | "user" | "host" | "threshold" | "fallback";
 
@@ -29,13 +30,14 @@ export interface PinOptions {
 
 export const DEFAULT_PIN: PinOptions = { messageMaxChars: 600, totalMaxTokens: 4096, indexMaxTokens: 3072 };
 
-interface Pinned {
+export interface Pinned {
   id: string;
   text: string;
   truncated: boolean;
+  kind?: UserKind | "notification";
 }
 
-function userText(e: SessionEntry): string | null {
+export function userText(e: SessionEntry): string | null {
   if (e.type !== "message" || e.message.role !== "user") return null;
   const c = e.message.content;
   if (typeof c === "string") return c;
@@ -55,33 +57,139 @@ export function droppedRange(context: readonly SessionEntry[], firstKeptEntryId:
   return context.slice(start, cut);
 }
 
+/** A delegated-task completion notification: `Delegated task <id> (<title>) [<status>]…`. */
+const NOTIFICATION = /^Delegated task \S+ \((.+?)\) \[([a-z_]+)\]/;
+const ACK_CONTEXT_CHARS = 300;
+const SHORT_LINE_CHARS = 120;
+
+function firstLine(text: string): string {
+  const l = text.split("\n").find((x) => x.trim()) ?? "";
+  return l.slice(0, cutAt(l, SHORT_LINE_CHARS));
+}
+
+function assistantText(e: SessionEntry): string | null {
+  if (e.type !== "message" || e.message.role !== "assistant") return null;
+  const t = e.message.content.map((p) => (p.type === "text" ? p.text : "")).join("\n").trim();
+  return t || null;
+}
+
 /**
- * Mechanical pinning (DESIGN.md §5 step 2): first user message verbatim, later
- * ones truncated to messageMaxChars; when the total budget is exceeded, the
- * first keeps full text and the rest keep first line + id.
+ * Pinning (DESIGN.md §5 step 2). The first user message stays verbatim. With Jev kinds:
+ * decisions keep up to 4× messageMaxChars, approvals carry the tail of the assistant
+ * text they answer, complaints shrink to their first line (questions do not: they often carry a proposal). Delegated-task
+ * notifications are always one line. Unclassified messages fall back to messageMaxChars.
+ * Over the total budget, messages collapse to their first line newest first (the mechanical rule): informational
+ * and unclassified ones before approvals, decisions last; the first message never collapses.
  */
-export function pinUserMessages(dropped: readonly SessionEntry[], opts: PinOptions = DEFAULT_PIN): Pinned[] {
-  const users = dropped.map((e) => ({ id: e.id, text: userText(e) })).filter((x): x is { id: string; text: string } => x.text !== null && x.text.trim().length > 0);
-  if (users.length === 0) return [];
+export function pinUserMessages(dropped: readonly SessionEntry[], opts: PinOptions = DEFAULT_PIN, kinds: ReadonlyMap<string, UserKind> = new Map()): Pinned[] {
   const out: Pinned[] = [];
-  const first = users[0]!;
-  out.push({ id: first.id, text: first.text, truncated: false });
-  for (const u of users.slice(1)) {
-    const t = u.text.length > opts.messageMaxChars ? `${u.text.slice(0, cutAt(u.text, opts.messageMaxChars))}…` : u.text;
-    out.push({ id: u.id, text: t, truncated: t !== u.text });
+  let lastAssistant: string | null = null;
+  for (const e of dropped) {
+    const a = assistantText(e);
+    if (a) lastAssistant = a;
+    const text = userText(e);
+    if (text === null || !text.trim()) continue;
+    const n = NOTIFICATION.exec(text.trimStart());
+    if (n) {
+      out.push({ id: e.id, text: `[subagent result] ${n[1]} [${n[2]}]`, truncated: true, kind: "notification" });
+      continue;
+    }
+    const kind = kinds.get(e.id);
+    if (out.every((p) => p.kind === "notification")) {
+      out.push({ id: e.id, text, truncated: false, kind });
+      continue;
+    }
+    if (kind === "vent") {
+      const line = firstLine(text);
+      out.push({ id: e.id, text: line, truncated: line !== text, kind });
+      continue;
+    }
+    const max = kind === "decide" ? opts.messageMaxChars * 4 : opts.messageMaxChars;
+    let t = text.length > max ? `${text.slice(0, cutAt(text, max))}…` : text;
+    const truncated = t !== text;
+    if (kind === "ack" && lastAssistant) {
+      const tail = lastAssistant.length > ACK_CONTEXT_CHARS ? `…${lastAssistant.slice(lastAssistant.length - ACK_CONTEXT_CHARS)}` : lastAssistant;
+      t += `\n  (answering assistant: ${tail.replace(/\s+/g, " ")})`;
+    }
+    out.push({ id: e.id, text: t, truncated, kind });
   }
   const budgetChars = opts.totalMaxTokens * 3.5;
   let total = out.reduce((n, p) => n + p.text.length, 0);
-  if (total > budgetChars) {
-    for (let i = out.length - 1; i >= 1 && total > budgetChars; i--) {
+  const firstUser = out.findIndex((p) => p.kind !== "notification");
+  const rank = (p: Pinned) => (p.kind === "decide" ? 2 : p.kind === "ack" ? 1 : 0);
+  for (const tier of [0, 1, 2]) {
+    for (let i = out.length - 1; i >= 0 && total > budgetChars; i--) {
       const p = out[i]!;
-      const first = p.text.split("\n").find((l) => l.trim()) ?? "";
-      const line = first.slice(0, cutAt(first, 120));
+      if (i === firstUser || p.kind === "notification" || rank(p) !== tier) continue;
+      const line = firstLine(p.text);
       total -= p.text.length - line.length;
-      out[i] = { id: p.id, text: line, truncated: true };
+      out[i] = { ...p, text: line, truncated: true };
     }
   }
   return out;
+}
+
+export interface Facts {
+  files: string[];
+  commits: string[];
+  answers: string[];
+}
+
+const COMMIT_LINE = /^\[([^\]]+?)(?: \(root-commit\))? ([0-9a-f]{7,40})\] (.+)$/gm;
+const EDIT_RESULT_TOOLS = new Set(["replace", "replace_match", "insert", "edit", "write"]);
+const MAX_FILES = 30;
+const MAX_COMMITS = 20;
+const MAX_ANSWERS = 10;
+
+function shortPath(p: string): string {
+  const home = process.env["HOME"];
+  return home && p.startsWith(`${home}/`) ? `~${p.slice(home.length)}` : p;
+}
+
+function pushRecent(list: string[], item: string): void {
+  const i = list.indexOf(item);
+  if (i >= 0) list.splice(i, 1);
+  list.push(item);
+}
+
+/**
+ * Facts the dropped range proves mechanically: files changed by edit tools, commits
+ * in the output of bash calls that run git, and answers given through ask_user_question. A quiet
+ * `git commit -q` prints nothing and is not seen.
+ */
+export function extractFacts(dropped: readonly SessionEntry[]): Facts {
+  const files: string[] = [];
+  const commits: string[] = [];
+  const answers: string[] = [];
+  const callPaths = new Map<string, string>();
+  const gitCalls = new Set<string>();
+  for (const e of dropped) {
+    if (e.type !== "message") continue;
+    const m = e.message;
+    if (m.role === "assistant") {
+      for (const p of m.content) {
+        if (p.type === "toolCall" && typeof p.arguments?.["path"] === "string") callPaths.set(p.id, p.arguments["path"] as string);
+        if (p.type === "toolCall" && p.name === "bash" && /\bgit\b/.test(String(p.arguments?.["command"] ?? ""))) gitCalls.add(p.id);
+      }
+      continue;
+    }
+    if (m.role !== "toolResult" || m.isError) continue;
+    const details = (m.details ?? {}) as Record<string, unknown>;
+    const text = m.content.map((p) => (p.type === "text" ? p.text : "")).join("\n");
+    if (EDIT_RESULT_TOOLS.has(m.toolName)) {
+      const snap = typeof details["snapshotId"] === "string" ? (details["snapshotId"] as string).split("|")[1] : undefined;
+      const patch = typeof details["patch"] === "string" ? /^--- (.+)$/m.exec(details["patch"] as string)?.[1] : undefined;
+      const path = snap ?? callPaths.get(m.toolCallId) ?? patch;
+      if (path) pushRecent(files, shortPath(path));
+    }
+    if (gitCalls.has(m.toolCallId)) for (const c of text.matchAll(COMMIT_LINE)) pushRecent(commits, `${c[2]} ${c[3]} (${c[1]})`);
+    if (m.toolName === "ask_user_question" && Array.isArray(details["answers"])) {
+      for (const a of details["answers"] as { question?: unknown; answer?: unknown }[]) {
+        if (typeof a.question === "string" && typeof a.answer === "string") answers.push(`${clip(a.question, 100)} → ${clip(a.answer, 100)}`);
+      }
+    }
+  }
+  return { files: files.slice(-MAX_FILES), commits: commits.slice(-MAX_COMMITS), answers: answers.slice(-MAX_ANSWERS) };
 }
 
 export interface IndexLine {
@@ -95,7 +203,7 @@ const INDEX_SHORT_CHARS = 40;
 /** Messages a host or orchestrator sends in the user role: indexed by kind only. */
 const MACHINE_MESSAGES: [RegExp, string][] = [
   [/^Context handoff \(/, "[context handoff]"],
-  [/^Delegated task \S+ reached a terminal state/, "[delegated task result]"],
+  [/^Delegated task \S+ (reached a terminal state|\(.+?\) \[[a-z_]+\])/, "[delegated task result]"],
 ];
 /**
  * Pasted log/data lines: JSON records, structural lines and quoted scalars,
@@ -204,6 +312,7 @@ export interface SummaryInput {
   notebook: Notebook;
   pinned: Pinned[];
   index?: { lines: IndexLine[]; omitted: number };
+  facts?: Facts;
 }
 
 export function renderRolloverSummary(s: SummaryInput): string {
@@ -218,6 +327,14 @@ export function renderRolloverSummary(s: SummaryInput): string {
     lines.push("## Earlier user messages in this session (index, oldest first; wN = window — a topic listed here was already worked on, read its entry before redoing it)");
     if (s.index.omitted > 0) lines.push(`(${s.index.omitted} older user messages not listed; \`history({ list: true })\` shows them)`);
     for (const l of s.index.lines) lines.push(renderIndexLine(l));
+  }
+  const facts = s.facts;
+  if (facts && (facts.files.length > 0 || facts.commits.length > 0 || facts.answers.length > 0)) {
+    lines.push("");
+    lines.push("## Facts from the dropped range (mechanical; verify current state before relying on them)");
+    if (facts.files.length > 0) lines.push(`Files edited: ${facts.files.join(", ")}`);
+    for (const c of facts.commits) lines.push(`Commit: ${c}`);
+    for (const a of facts.answers) lines.push(`User answered: ${a}`);
   }
   if (s.pinned.length > 0) {
     lines.push("");
