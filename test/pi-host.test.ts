@@ -298,6 +298,7 @@ describe("Pi host integration", () => {
       record(s, fauxAssistantMessage(fauxToolCall("new_context", {}), { stopReason: "toolUse" })),
       record(s, fauxAssistantMessage("Ending for the rollover.")),
       record(s, fauxAssistantMessage("Housekeeping complete; stopping.")),
+      record(s, fauxAssistantMessage("Resuming the user's work.")),
     ], { idleTidyEnabled: true, jevEnabled: false, minReclaimTokens: 1_000 });
     try {
       await session.bindExtensions({ mode: "rpc" });
@@ -313,6 +314,12 @@ describe("Pi host integration", () => {
       expect(next).not.toContain("Continue with the notebook's Next action");
       expect(next).not.toContain("Idle notebook tidy:");
       expect(timers).toHaveLength(2); // only the two genuine user runs armed a clock
+      await session.prompt("继续", { source: "rpc" });
+      await session.waitForIdle();
+      const userRun = text(seen[7]!);
+      expect(userRun).toContain("earlier idle tidy continuation — expired; no action required");
+      expect(userRun).not.toContain("Do not resume any work");
+      expect(userRun).not.toContain("End this run now");
     } finally {
       session.dispose();
     }

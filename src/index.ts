@@ -5,6 +5,7 @@
  * host fallback, branch-state reset.
  */
 
+import { randomUUID } from "node:crypto";
 import { SettingsManager, type ExtensionAPI, type ExtensionContext, type SessionBoundaryDraft, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { loadConfig, type Config } from "./config.ts";
@@ -61,6 +62,8 @@ const NewContextParams = Type.Object({
 });
 const MAINTENANCE_CUSTOM_TYPE = "note-context/maintenance";
 const REMINDER_CUSTOM_TYPE = "note-context/reminder";
+const TIDY_CONTINUE_CUSTOM_TYPE = "note-context/tidy-continue";
+type TidyContinuation = { requestId: string; window: number; seen: boolean };
 /** Custom type of the per-request status message written by versions ≤ 0.3; filtered out of context, never written. */
 const LEGACY_STATUS_CUSTOM_TYPE = "note-context/status";
 const OWN_TOOLS = new Set(["notes", "history", "new_context"]);
@@ -79,7 +82,10 @@ export default function noteContext(pi: ExtensionAPI): void {
   let pendingRollover: { reason: RolloverReason; requestedAtLeaf: string | null } | null = null;
   let inFlightRollover: { reason: RolloverReason } | null = null;
   /** A rollover proposed as boundary entries, not yet seen persisted (see reconcileProposal). */
-  let proposal: { reason: RolloverReason; afterLeaf: string | null; record: () => void } | null = null;
+  let proposal: { reason: RolloverReason; afterLeaf: string | null; record: () => void; tidyContinuation: TidyContinuation | null } | null = null;
+  /** Separate from idleTidy.activeRequest: compact callbacks can run after its settlement cleanup. */
+  let tidyContinuation: TidyContinuation | null = null;
+  let tidyContinuationEpoch = 0; // user input/resets invalidate callbacks captured before them
   /** The current run was aborted by the user (ESC). Seen on ctx.signal at turn_end/agent_end; cleared at agent_start. */
   let runAborted = false;
   let maintenance: MaintenanceState = { kind: "idle" };
@@ -102,6 +108,8 @@ export default function noteContext(pi: ExtensionAPI): void {
 
   const resetVolatile = () => {
     idleTidy.reset();
+    tidyContinuation = null;
+    tidyContinuationEpoch++;
     branchChangedPending = false;
     pendingRollover = null;
     inFlightRollover = null;
@@ -127,6 +135,13 @@ export default function noteContext(pi: ExtensionAPI): void {
     const k = modelKey(ctx);
     return k !== null && config.externalCompactionModels.includes(k);
   };
+
+  function continuationMessage(content: string, window: number, epoch = tidyContinuationEpoch) {
+    if (content !== TIDY_CONTINUE) return { customType: "note-context/continue", content, display: true };
+    const details = { requestId: randomUUID(), window };
+    if (epoch === tidyContinuationEpoch) tidyContinuation = { ...details, seen: false };
+    return { customType: TIDY_CONTINUE_CUSTOM_TYPE, content, display: true, details };
+  }
 
   function issuingAssistantId(ctx: ExtensionContext): string | null {
     const branch = branchOf(ctx);
@@ -467,12 +482,13 @@ export default function noteContext(pi: ExtensionAPI): void {
       // An external compaction owner writes the summary, so this goes through Pi's compaction.
       // Capture the run policy before compaction/settlement can clear its tidy scope.
       const continueText = idleTidy.activeRequest !== null ? TIDY_CONTINUE : FALLBACK_CONTINUE;
+      const continueEpoch = tidyContinuationEpoch;
       inFlightRollover = { reason: "fallback" };
       ctx.compact({
         onComplete: () => {
           inFlightRollover = null;
           pi.sendMessage(
-            { customType: "note-context/continue", content: continueText, display: true },
+            continuationMessage(continueText, currentWindow(branchOf(ctx)), continueEpoch),
             { deliverAs: "followUp", triggerTurn: true },
           );
         },
@@ -551,8 +567,9 @@ export default function noteContext(pi: ExtensionAPI): void {
   }
 
   /** Volatile state for a freshly opened window. */
-  function onWindowOpened(): void {
+  function onWindowOpened(continuation: TidyContinuation | null = null): void {
     idleTidy.cancel();
+    tidyContinuation = continuation;
     pendingRollover = null;
     inFlightRollover = null;
     maintenance = step(maintenance, { type: "rollover_done" }, () => attemptCounter).state;
@@ -580,10 +597,11 @@ export default function noteContext(pi: ExtensionAPI): void {
     }
     const template = templateRollover(ctx, context, cut.firstKeptEntryId, reason);
     if (!template) return null;
-    proposal = { reason, afterLeaf: ctx.sessionManager.getLeafId(), record: template.record };
+    const continuation = continuationMessage(continueText, currentWindow(branchOf(ctx)) + 1);
+    proposal = { reason, afterLeaf: ctx.sessionManager.getLeafId(), record: template.record, tidyContinuation: continueText === TIDY_CONTINUE ? tidyContinuation : null };
     return [
       { type: "compaction", summary: template.summary, firstKeptEntryId: cut.firstKeptEntryId, details: template.details },
-      { type: "custom_message", customType: "note-context/continue", content: continueText, display: true },
+      { type: "custom_message", ...continuation },
     ];
   }
 
@@ -603,9 +621,12 @@ export default function noteContext(pi: ExtensionAPI): void {
     const committed = (p.afterLeaf === null || from >= 0) && branch.slice(from + 1).some((e) => e.type === "compaction" && isRolloverDetails(e.details));
     if (committed) {
       p.record();
-      onWindowOpened();
+      // Carry only this committed draft's still-live scope into its destination window.
+      // A genuine input/reset between proposal and commit must not resurrect the instruction.
+      onWindowOpened(tidyContinuation === p.tidyContinuation && tidyContinuation?.window === currentWindow(branch) ? tidyContinuation : null);
       return;
     }
+    if (tidyContinuation === p.tidyContinuation) tidyContinuation = null;
     const window = currentWindow(branch);
     appendLedger({ kind: "rollover_failed", session: sessionId(ctx), window, reason: p.reason, why: "boundary_rejected" });
     if (p.reason === "fallback") {
@@ -678,7 +699,12 @@ export default function noteContext(pi: ExtensionAPI): void {
   }
 
   pi.on("input", async (event) => {
-    idleTidy.input(event.source === "interactive" || event.source === "rpc");
+    const genuine = event.source === "interactive" || event.source === "rpc";
+    idleTidy.input(genuine);
+    if (genuine) {
+      tidyContinuation = null;
+      tidyContinuationEpoch++;
+    }
     return undefined;
   });
   pi.on("user_bash", async () => {
@@ -733,8 +759,11 @@ export default function noteContext(pi: ExtensionAPI): void {
   // template (Pi's LLM summary takes over), or another extension compacting at that boundary.
   pi.on("agent_settled", async (_event, ctx) => {
     const continueText = idleTidy.activeRequest !== null ? TIDY_CONTINUE : SCHEDULED_CONTINUE;
+    const continueEpoch = tidyContinuationEpoch;
     idleTidy.settled();
     reconcileProposal(ctx);
+    // Do not expire an onComplete message queued during the previous run's settlement.
+    if (tidyContinuation?.seen) tidyContinuation = null;
     if (!pendingRollover || !scheduled(pendingRollover.reason)) return;
     // ESC means stop: rolling over would compact and then trigger a continuation turn the user
     // just interrupted. Only an explicit user request for a fresh window survives the abort.
@@ -751,7 +780,7 @@ export default function noteContext(pi: ExtensionAPI): void {
       onComplete: () => {
         inFlightRollover = null;
         pi.sendMessage(
-          { customType: "note-context/continue", content: continueText, display: true },
+          continuationMessage(continueText, currentWindow(branchOf(ctx)), continueEpoch),
           { deliverAs: "followUp", triggerTurn: true },
         );
       },
@@ -858,6 +887,15 @@ export default function noteContext(pi: ExtensionAPI): void {
           if (idleTidy.activeRequest !== null && scope?.requestId === idleTidy.activeRequest && scope.window === window) return m;
           return { ...m, content: "[note-context] (earlier idle notebook tidy — expired; no action required)" };
         }
+        if (m.role === "custom" && (m.customType === TIDY_CONTINUE_CUSTOM_TYPE || (m.customType === "note-context/continue" && m.content === TIDY_CONTINUE))) {
+          const scope = m.details as { requestId?: string; window?: number } | undefined;
+          if (tidyContinuation !== null && scope?.requestId === tidyContinuation.requestId && scope.window === window && tidyContinuation.window === window) {
+            tidyContinuation.seen = true;
+            return m;
+          }
+          // Includes legacy unscoped tidy text and saved messages after reload/restart.
+          return { ...m, content: "[note-context] (earlier idle tidy continuation — expired; no action required)" };
+        }
         // Old reminders carry both a live rollover command and an obsolete notebook snapshot.
         // Unscoped reminders from older versions cannot be proved current, so expire them too.
         if (m.role === "custom" && m.customType === REMINDER_CUSTOM_TYPE) {
@@ -934,6 +972,8 @@ export default function noteContext(pi: ExtensionAPI): void {
   pi.on("session_before_fork", async () => resetVolatile());
   pi.on("session_shutdown", async () => {
     idleTidy.reset();
+    tidyContinuation = null;
+    tidyContinuationEpoch++;
     await flushLedger();
   });
 

@@ -236,6 +236,72 @@ describe("idle tidy hook policy", () => {
     expect(timers).toHaveLength(1);
   }));
 
+  test.each(["agent_settled", "input", "session_start", "session_tree", "session_before_switch", "session_before_fork", "session_shutdown", "session_compact", "restart"])("tidy boundary continuation expires after %s without changing the journal", async (expiry) => withIdleTimers(async (timers) => {
+    const h = harness({ idleTidyEnabled: true, jevEnabled: false });
+    await beginTidy(h, timers);
+    await h.notes({ reviewed: true });
+    await h.newContext();
+    await h.beforeSettle();
+    expect(JSON.stringify(await h.nextRequest())).toContain("Do not resume any work");
+    const persisted = h.branch.find((e) => e.type === "custom_message" && String(e.content).includes("Idle notebook tidy is complete"))!;
+    expect(persisted).toBeDefined();
+    const messages = h.ctx.sessionManager.buildSessionProjection().messages;
+    if (expiry === "restart") {
+      // New extension instance has no volatile scope; replay even before any lifecycle event.
+      const restarted = harness({ idleTidyEnabled: true, jevEnabled: false });
+      restarted.branch.splice(0, restarted.branch.length, ...h.branch);
+      const next = JSON.stringify(await restarted.emit("context", { messages }));
+      expect(next).toContain("earlier idle tidy continuation — expired; no action required");
+      expect(next).not.toContain("Do not resume any work");
+    } else {
+      await h.emit(expiry, { source: "rpc", compactionEntry: { details: {} } });
+      const next = JSON.stringify(await h.emit("context", { messages }));
+      expect(next).toContain("earlier idle tidy continuation — expired; no action required");
+      expect(next).not.toContain("Do not resume any work");
+    }
+    expect(persisted.type === "custom_message" && persisted.content).toContain("Do not resume any work");
+  }));
+
+  test("user input between a boundary proposal and its continuation cannot revive tidy", async () => withIdleTimers(async (timers) => {
+    const h = harness({ idleTidyEnabled: true, jevEnabled: false });
+    await beginTidy(h, timers);
+    await h.notes({ reviewed: true });
+    await h.newContext();
+    await h.beforeSettle();
+    await h.emit("input", { source: "rpc" });
+    const next = JSON.stringify(await h.nextRequest());
+    expect(next).toContain("earlier idle tidy continuation — expired; no action required");
+    expect(next).not.toContain("Do not resume any work");
+  }));
+
+  test.each(["input", "session_start"])("%s before a compact callback cannot revive the captured tidy policy", async (expiry) => withIdleTimers(async (timers) => {
+    const h = harness({ idleTidyEnabled: true, jevEnabled: false, externalCompactionModels: ["p/m"] });
+    await beginTidy(h, timers);
+    await h.notes({ reviewed: true });
+    await h.newContext();
+    await h.settle();
+    await h.emit(expiry, { source: "rpc" });
+    await h.emit("session_compact", { compactionEntry: { details: {} } });
+    h.compactCalls[0]!.onComplete!();
+    await h.startRun();
+    const next = JSON.stringify(await h.emit("context", { messages: [{ ...h.sent.at(-1), role: "custom", timestamp: 1 }] }));
+    expect(next).toContain("earlier idle tidy continuation — expired; no action required");
+    expect(next).not.toContain("Do not resume any work");
+  }));
+
+  test("legacy tidy continuations expire on restart but ordinary continuations are unchanged", async () => {
+    const h = harness({ jevEnabled: false });
+    const messages = [
+      "[note-context] New context window started. Idle notebook tidy is complete. Do not resume any work or execute the notebook's Next action. End this run now.",
+      "[note-context] New context window started. Continue with the notebook's Next action.",
+      "[note-context] New context window started after the maintenance checkpoint. Continue with the notebook's Next action.",
+    ].map((content) => ({ role: "custom", customType: "note-context/continue", content, timestamp: 1 }));
+    const result = (await h.emit("context", { messages }))[0] as { messages: { content: string }[] };
+    expect(result.messages[0]!.content).toContain("earlier idle tidy continuation — expired; no action required");
+    expect(result.messages[1]).toBe(messages[1]);
+    expect(result.messages[2]).toBe(messages[2]);
+  });
+
   test("tidy continuation survives settled cleanup on external-owner and declined-boundary compaction", async () => withIdleTimers(async (timers) => {
     for (const external of [false, true]) {
       const h = harness({ idleTidyEnabled: true, jevEnabled: false, externalCompactionModels: external ? ["p/m"] : [] });
@@ -245,6 +311,7 @@ describe("idle tidy hook policy", () => {
       h.piHost.rejectBoundary = !external;
       await h.settle();
       expect(h.compactCalls).toHaveLength(1);
+      await h.emit("session_compact", { compactionEntry: { details: {} } });
       h.compactCalls[0]!.onComplete!(); // after settled() has already cleared the tidy request
       const continuation = h.sent.at(-1)!;
       await h.startRun();
@@ -252,7 +319,31 @@ describe("idle tidy hook policy", () => {
       expect(next).toContain("Idle notebook tidy is complete");
       expect(next).toContain("Do not resume any work");
       expect(next).not.toContain("Continue with the notebook's Next action");
+      await h.emit("agent_settled");
+      const expired = JSON.stringify(await h.emit("context", { messages: [{ ...continuation, role: "custom", timestamp: 1 }] }));
+      expect(expired).toContain("earlier idle tidy continuation — expired; no action required");
+      expect(expired).not.toContain("Do not resume any work");
     }
+  }));
+
+  test("external fallback continuation stays live across the previous run's settlement", async () => withIdleTimers(async (timers) => {
+    const h = harness({ idleTidyEnabled: true, jevEnabled: false, externalCompactionModels: ["p/m"] });
+    await beginTidy(h, timers);
+    h.usage.tokens = 380_000;
+    await h.turnEnd();
+    await h.notes({ reviewed: true });
+    expect(h.compactCalls).toHaveLength(1);
+    await h.emit("session_compact", { compactionEntry: { details: {} } });
+    h.compactCalls[0]!.onComplete!();
+    await h.emit("agent_settled"); // queued continuation has not reached context yet
+    await h.startRun();
+    const messages = [{ ...h.sent.at(-1), role: "custom", timestamp: 1 }];
+    const next = JSON.stringify(await h.emit("context", { messages }));
+    expect(next).toContain("Do not resume any work");
+    await h.emit("agent_settled");
+    const expired = JSON.stringify(await h.emit("context", { messages }));
+    expect(expired).toContain("earlier idle tidy continuation — expired; no action required");
+    expect(expired).not.toContain("Do not resume any work");
   }));
 
   test("final settlement expires tidy in the same window; extension input cannot re-arm but genuine input can", async () => withIdleTimers(async (timers) => {
