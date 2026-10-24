@@ -55,11 +55,30 @@ describe("applySections", () => {
     expect(!r.ok && r.reason).toBe("empty_result");
   });
 
-  test("caps section count", () => {
+  test("folds custom sections beyond the cap into State instead of rejecting the write", () => {
+    const current = { Task: "t", State: "s", Decisions: "d", Next: "n", Refs: "r", A: "a", B: "b" };
+    const r = applySections(current, { sections: { C: "c1\nc2", D: "d1" } });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(Object.keys(r.sections)).toEqual(["Task", "State", "Decisions", "Next", "Refs", "A", "B", "C"]);
+    expect(r.sections.State).toBe("s\nD: d1");
+    expect(r.merged).toEqual(["D"]);
+  });
+
+  test("creates State when folding and State is absent", () => {
     const many: Record<string, string> = {};
     for (let i = 0; i <= MAX_SECTIONS; i++) many[`S${i}`] = "x";
     const r = applySections({}, { sections: many });
-    expect(!r.ok && r.reason).toBe("too_many_sections");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(Object.keys(r.sections)).toHaveLength(MAX_SECTIONS);
+    expect(r.sections.State).toBe("S7: x\nS8: x");
+    expect(r.merged).toEqual(["S7", "S8"]);
+  });
+
+  test("a write within the cap reports nothing merged", () => {
+    const r = applySections({}, { sections: { Task: "t", Custom: "c" } });
+    expect(r.ok && r.merged).toEqual([]);
   });
 
   test("rejects section names that cannot be rendered as headings", () => {

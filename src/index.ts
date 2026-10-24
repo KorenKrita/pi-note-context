@@ -23,7 +23,7 @@ import { activeHistoryIds, currentWindow, indexBranch, isRolloverDetails, list, 
 import { appendLedger, flushLedger } from "./ledger.ts";
 import { IdleTidy, IDLE_TIDY_CUSTOM_TYPE, IDLE_TIDY_TEXT } from "./idle-tidy.ts";
 import { maintenanceRequestText, reminderText, reminderThreshold, step, zoneFor, type MaintenanceState, type Thresholds } from "./maintenance.ts";
-import { applySections, makeRecord, NOTEBOOK_ENTRY_TYPE, reconstructNotebook, renderNotebook, type Notebook } from "./notebook.ts";
+import { applySections, makeRecord, MAX_SECTIONS, NOTEBOOK_ENTRY_TYPE, reconstructNotebook, renderNotebook, type Notebook } from "./notebook.ts";
 import { estimateTokens as estimateText } from "./notebook.ts";
 import { droppedRange, extractFacts, indexUserMessages, makeDetails, pinUserMessages, renderRolloverSummary, userText, type RolloverReason } from "./rollover.ts";
 import { classifyUserMessage, unrecordedDecisionProbability, type UserKind } from "./jev.ts";
@@ -345,9 +345,12 @@ export default function noteContext(pi: ExtensionAPI): void {
       const auto = considerAutoRollover(ctx, notebookOf(ctx));
       const remainingBytes = config.limits.maxBytes - result.size.bytes;
       const remainingTokens = config.limits.maxTokens - result.size.tokensEstimate;
+      const merged = result.merged.length > 0
+        ? `\nOver ${MAX_SECTIONS} sections: ${result.merged.join(", ")} were folded into State as "Name: text" lines. Tidy the notebook now: move each folded line into the canonical section it belongs to, drop what is stale, and keep custom sections few.`
+        : "";
       return text(
-        `Notebook revision ${record.revision} saved: ${Object.keys(result.sections).length} section(s), ${result.size.bytes} bytes / ~${result.size.tokensEstimate} tokens; ${remainingBytes} bytes / ~${remainingTokens} tokens remaining.${auto}`,
-        { revision: record.revision, sections: Object.keys(result.sections), bytes: result.size.bytes, tokensEstimate: result.size.tokensEstimate, autoRollover: auto !== "" },
+        `Notebook revision ${record.revision} saved: ${Object.keys(result.sections).length} section(s), ${result.size.bytes} bytes / ~${result.size.tokensEstimate} tokens; ${remainingBytes} bytes / ~${remainingTokens} tokens remaining.${merged}${auto}`,
+        { revision: record.revision, sections: Object.keys(result.sections), merged: result.merged, bytes: result.size.bytes, tokensEstimate: result.size.tokensEstimate, autoRollover: auto !== "" },
       );
     },
   });

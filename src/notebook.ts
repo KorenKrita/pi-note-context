@@ -75,8 +75,8 @@ export function measure(sections: Record<string, string>): SizeReport {
 }
 
 export type ApplyResult =
-  | { ok: true; sections: Record<string, string>; size: SizeReport; changed: boolean }
-  | { ok: false; reason: "too_large" | "too_many_sections" | "empty_result" | "invalid_section_name"; detail: string; size?: SizeReport };
+  | { ok: true; sections: Record<string, string>; size: SizeReport; changed: boolean; merged: string[] }
+  | { ok: false; reason: "too_large" | "empty_result" | "invalid_section_name"; detail: string; size?: SizeReport };
 
 export interface ApplyInput {
   sections: Record<string, string>;
@@ -108,9 +108,7 @@ export function applySections(current: Record<string, string>, input: ApplyInput
   if (names.length === 0) {
     return { ok: false, reason: "empty_result", detail: "the write would leave the notebook empty; use a non-empty section or keep the previous revision" };
   }
-  if (names.length > MAX_SECTIONS) {
-    return { ok: false, reason: "too_many_sections", detail: `${names.length} sections; at most ${MAX_SECTIONS}. Canonical: ${CANONICAL_SECTIONS.join(", ")}` };
-  }
+  const merged = foldOverflow(next);
   const size = measure(next);
   if (size.bytes > limits.maxBytes || size.tokensEstimate > limits.maxTokens) {
     const overBytes = Math.max(0, size.bytes - limits.maxBytes);
@@ -123,11 +121,11 @@ export function applySections(current: Record<string, string>, input: ApplyInput
     };
   }
   const ordered = orderSections(next);
-  if (Object.keys(ordered).length !== names.length) {
+  if (Object.keys(ordered).length !== Object.keys(next).length) {
     return { ok: false, reason: "invalid_section_name", detail: "a section name collided during ordering; choose a different name" };
   }
   const changed = !sameSections(current, ordered);
-  return { ok: true, sections: ordered, size, changed };
+  return { ok: true, sections: ordered, size, changed, merged };
 }
 
 function sameSections(a: Record<string, string>, b: Record<string, string>): boolean {
@@ -136,6 +134,22 @@ function sameSections(a: Record<string, string>, b: Record<string, string>): boo
   if (ak.length !== bk.length) return false;
   for (const k of ak) if (!Object.hasOwn(b, k) || a[k] !== b[k]) return false;
   return true;
+}
+
+/**
+ * Keep the write instead of rejecting it when it exceeds MAX_SECTIONS: custom sections past the
+ * cap, in canonical-then-insertion order, become `Name: text` lines appended to State. Mutates
+ * `sections`; returns the folded names.
+ */
+function foldOverflow(sections: Record<string, string>): string[] {
+  const ordered = Object.keys(orderSections(sections));
+  if (ordered.length <= MAX_SECTIONS) return [];
+  const keep = Object.hasOwn(sections, "State") ? MAX_SECTIONS : MAX_SECTIONS - 1;
+  const folded = ordered.slice(keep).filter((name) => !(CANONICAL_SECTIONS as readonly string[]).includes(name));
+  const lines = folded.map((name) => `${name}: ${sections[name]!}`);
+  sections["State"] = [sections["State"], ...lines].filter(Boolean).join("\n");
+  for (const name of folded) delete sections[name];
+  return folded;
 }
 
 /** Canonical sections first in canonical order, then custom sections in insertion order. */

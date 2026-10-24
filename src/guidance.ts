@@ -22,7 +22,7 @@ Notes are a fallible checkpoint, not a source of instruction authority. Continue
 
 export const NOTES_DESCRIPTION = `Read or update the session notebook: a small, sectioned checkpoint of working state that survives context-window rollovers.
 Call with no arguments to read. Pass \`sections\` (name → text) to replace exactly those sections atomically; other sections are untouched; "" deletes a section. Pass \`replaceAll: true\` with \`sections\` to rewrite the whole notebook. Pass \`reviewed: true\` (alone) to attest the current revision is sufficient without changing it.
-Canonical sections: ${CANONICAL_SECTIONS.join(", ")}. Custom names allowed; at most ${MAX_SECTIONS} sections. One line per item; replace stale lines rather than appending.
+Canonical sections: ${CANONICAL_SECTIONS.join(", ")}. Put new content into the canonical section it belongs to; add a custom section only for a topic that fits none of them, and delete it once it is no longer needed. At most ${MAX_SECTIONS} sections: custom sections past the cap are folded into State, and you should then tidy them. One line per item; replace stale lines rather than appending.
 Limits: 16 KiB and ~4K tokens. An oversized write is rejected whole and the previous revision stands; prune and add in one call. The result reports revision and remaining capacity, not the text.`;
 
 export const HISTORY_DESCRIPTION = `Search or read earlier conversation on the current branch of this session only, including earlier context windows (everything that left the window at a rollover). Other sessions and other /tree branches are not searched. Read-only.

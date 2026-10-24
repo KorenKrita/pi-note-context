@@ -37,7 +37,7 @@ One notebook per session-branch, reconstructed from the ancestor chain of the ac
 | `notes({ sections: {...}, replaceAll: true })` | Replace the whole notebook with exactly these sections. |
 | `notes({ reviewed: true })` | Attest that the current revision was reviewed against the material about to leave the window and needs no change. Advances the review marker without a content write. |
 
-Canonical sections (documented in the tool description; free-form names allowed, at most 8 sections total):
+Canonical sections (documented in the tool description; free-form names allowed, at most 8 sections total). A write that would exceed 8 is not rejected: custom sections past the cap (canonical first, then insertion order) are folded into State as `Name: text` lines, and the result names them and asks the agent to tidy:
 
 - **Task** — what is being done, for whom, binding constraints and prohibitions.
 - **State** — observed (not intended) state: what is done, what is verified, what is blocked. Label uncertainty: `untested`, `inferred`, `blocked`.
