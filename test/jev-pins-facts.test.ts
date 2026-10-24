@@ -55,11 +55,13 @@ describe("pinUserMessages with Jev kinds", () => {
 describe("extractFacts", () => {
   const home = process.env["HOME"]!;
   const dropped = [
-    assistant("a1", "", [{ id: "c1", name: "replace", args: {} }, { id: "c2", name: "write", args: { path: "/tmp/new.ts" } }, { id: "c3", name: "bash", args: { command: "git commit -m x" } }, { id: "c6", name: "read", args: {} }]),
+    assistant("a1", "", [{ id: "c1", name: "replace", args: {} }, { id: "c2", name: "write", args: { path: "/tmp/new.ts" } }, { id: "c3", name: "bash", args: { command: "git commit -m x" } }, { id: "c6", name: "read", args: {} }, { id: "c7", name: "read", args: { path: "/skills/review/SKILL.md" } }, { id: "c8", name: "read", args: { path: "/skills/review/reviewer.md" } }]),
     withDetails(toolResult("t1", "c1", "replace", "ok"), { snapshotId: `v2|${home}/repo/src/a.ts|1|2|3|4` }),
     toolResult("t2", "c2", "write", "Successfully wrote"),
     toolResult("t3", "c3", "bash", "[main 1a2b3c4] feat: add parser\n 1 file changed\n[feat/x (root-commit) 9f8e7d6] init\n[detached HEAD 5e6f7a8] wip"),
     toolResult("t6", "c6", "read", "Example:\n[main 0000aaa] not a real commit"),
+    toolResult("t7", "c7", "read", "# Review skill"),
+    toolResult("t8", "c8", "read", "reviewer prompt"),
     withDetails(toolResult("t4", "c4", "ask_user_question", "answered"), { answers: [{ question: "Which tier?", answer: "standard" }] }),
     withDetails(toolResult("t5", "c1", "replace", "failed"), { snapshotId: "v2|/tmp/failed.ts|1" }, true),
   ];
@@ -69,6 +71,7 @@ describe("extractFacts", () => {
     expect(facts.files).toEqual(["~/repo/src/a.ts", "/tmp/new.ts"]);
     expect(facts.commits).toEqual(["1a2b3c4 feat: add parser (main)", "9f8e7d6 init (feat/x)", "5e6f7a8 wip (detached HEAD)"]); // not the `read` example
     expect(facts.answers).toEqual(["Which tier? → standard"]);
+    expect(facts.skills).toEqual(["/skills/review/SKILL.md"]); // only SKILL.md, not other reads
   });
 
   test("the rollover summary renders them in their own section", () => {
@@ -77,6 +80,7 @@ describe("extractFacts", () => {
     expect(summary).toContain("## Facts from the dropped range");
     expect(summary).toContain("Commit: 1a2b3c4 feat: add parser (main)");
     expect(summary).toContain("User answered: Which tier? → standard");
+    expect(summary).toContain("Skills read (their text left the window; re-read one before following it): /skills/review/SKILL.md");
   });
 });
 

@@ -131,6 +131,8 @@ export function pinUserMessages(dropped: readonly SessionEntry[], opts: PinOptio
 
 export interface Facts {
   files: string[];
+  /** SKILL.md files read in the dropped range: their text left the window. */
+  skills: string[];
   commits: string[];
   answers: string[];
 }
@@ -153,12 +155,14 @@ function pushRecent(list: string[], item: string): void {
 }
 
 /**
- * Facts the dropped range proves mechanically: files changed by edit tools, commits
+ * Facts the dropped range proves mechanically: files changed by edit tools, SKILL.md files
+ * read (their instructions leave the window with the read result), commits
  * in the output of bash calls that run git, and answers given through ask_user_question. A quiet
  * `git commit -q` prints nothing and is not seen.
  */
 export function extractFacts(dropped: readonly SessionEntry[]): Facts {
   const files: string[] = [];
+  const skills: string[] = [];
   const commits: string[] = [];
   const answers: string[] = [];
   const callPaths = new Map<string, string>();
@@ -182,6 +186,8 @@ export function extractFacts(dropped: readonly SessionEntry[]): Facts {
       const path = snap ?? callPaths.get(m.toolCallId) ?? patch;
       if (path) pushRecent(files, shortPath(path));
     }
+    const readPath = m.toolName === "read" ? callPaths.get(m.toolCallId) : undefined;
+    if (readPath && /(^|\/)SKILL\.md$/.test(readPath)) pushRecent(skills, shortPath(readPath));
     if (gitCalls.has(m.toolCallId)) for (const c of text.matchAll(COMMIT_LINE)) pushRecent(commits, `${c[2]} ${c[3]} (${c[1]})`);
     if (m.toolName === "ask_user_question" && Array.isArray(details["answers"])) {
       for (const a of details["answers"] as { question?: unknown; answer?: unknown }[]) {
@@ -189,7 +195,7 @@ export function extractFacts(dropped: readonly SessionEntry[]): Facts {
       }
     }
   }
-  return { files: files.slice(-MAX_FILES), commits: commits.slice(-MAX_COMMITS), answers: answers.slice(-MAX_ANSWERS) };
+  return { files: files.slice(-MAX_FILES), skills: skills.slice(-MAX_FILES), commits: commits.slice(-MAX_COMMITS), answers: answers.slice(-MAX_ANSWERS) };
 }
 
 export interface IndexLine {
@@ -329,10 +335,11 @@ export function renderRolloverSummary(s: SummaryInput): string {
     for (const l of s.index.lines) lines.push(renderIndexLine(l));
   }
   const facts = s.facts;
-  if (facts && (facts.files.length > 0 || facts.commits.length > 0 || facts.answers.length > 0)) {
+  if (facts && (facts.files.length > 0 || facts.skills.length > 0 || facts.commits.length > 0 || facts.answers.length > 0)) {
     lines.push("");
     lines.push("## Facts from the dropped range (mechanical; verify current state before relying on them)");
     if (facts.files.length > 0) lines.push(`Files edited: ${facts.files.join(", ")}`);
+    if (facts.skills.length > 0) lines.push(`Skills read (their text left the window; re-read one before following it): ${facts.skills.join(", ")}`);
     for (const c of facts.commits) lines.push(`Commit: ${c}`);
     for (const a of facts.answers) lines.push(`User answered: ${a}`);
   }

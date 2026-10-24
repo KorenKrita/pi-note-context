@@ -70,7 +70,7 @@ The one-per-window reminder (from the reminder threshold) likewise carries no co
 
 Jev endpoint: by default the classifier is Pi's `typesafe/<jevModel>` and uses that provider's URL and key; `jevApiKey` alone overrides the key. Setting `jevBaseUrl` (e.g. `https://api.typesafe.ai/v1` or a local proxy such as `http://127.0.0.1:8317/v0/management/v1`) calls the TypeSafe API there directly, with `jevApiKey` — Pi's provider URL would otherwise override it. That path requires a key: without one Pi rejects the call locally and the mechanical rules apply. `jevApiKey` may be `$NAME` to read the environment variable NAME.
 
-The rollover summary also lists mechanical facts from the dropped range: files changed by edit tools, commits seen in the output of bash calls that run git (a quiet `git commit -q` prints nothing and is missed), and answers given through `ask_user_question`.
+The rollover summary also lists mechanical facts from the dropped range: files changed by edit tools, `SKILL.md` files read (their instructions left the window, so the model is told to re-read one before following it), commits seen in the output of bash calls that run git (a quiet `git commit -q` prints nothing and is missed), and answers given through `ask_user_question`.
 
 `externalCompactionModels` lists `provider/model` ids whose compaction is owned by another extension (e.g. remote Codex compaction); this plugin then yields the summary step for those models but keeps notes, history, reminders and the status line.
 
