@@ -49,6 +49,8 @@ Optional `~/.pi/agent/pi-note-context.json` (global only; every field optional):
   "externalCompactionModels": [],
   "entryIdTrailers": true,
   "autoRollover": true,
+  "idleTidyEnabled": false,
+  "idleTidyAfterMinutes": 55,
   "budgetTokens": 400000,
   "fallbackBudgetTokens": 400000,
   "statusStepTokens": 40000,
@@ -85,6 +87,20 @@ The rollover summary also lists mechanical facts from the dropped range: files c
 `externalCompactionModels` lists `provider/model` ids whose compaction is owned by another extension (e.g. remote Codex compaction); this plugin then yields the summary step for those models but keeps notes, history, reminders and the status line.
 
 Ledger: `~/.pi/agent/state/note-context-ledger.jsonl` (counts and ids only). Disable with `NOTE_CONTEXT_LEDGER_DISABLED=1`.
+
+## Idle notebook tidy (opt-in)
+
+Set `idleTidyEnabled: true` in `pi-note-context.json`. `idleTidyAfterMinutes` defaults to `55`; it accepts finite numbers from 1 minute up to the platform timeout limit (~24.8 days). Invalid values fall back to 55. Reload/restart after changing configuration.
+
+After a genuine user message (Pi input source `interactive` or `rpc`), the clock starts at `agent_end`, not at user input or after each tool turn. New input, prompt preparation, or `agent_start` cancels it; a retry/continuation's end starts a fresh clock. At the deadline the extension sends one visible `note-context/idle-tidy` custom message with `triggerTurn: true`, but only if the agent is idle with a model, no queued messages, no pending rollover/checkpoint, and the run was not aborted.
+
+That message asks the agent to read and tidy its existing notes, replace stale facts, and record new conclusions. The agent then decides whether to call `new_context`; all existing gates still apply and `userRequested: true` is not implied. **Policy exception:** during this housekeeping run (including automatic continuations until final settlement), ordinary rollover reminders and host auto-scheduling after notes writes are deferred, even with `autoRollover: true`. The high-pressure fallback still enforces its checkpoint/tool guard and rollover. There is no new forced rollover or pause behavior.
+
+The opportunity is consumed before dispatch: finishing tidy does **not** schedule another timer, nor do extension-generated messages re-arm it. Only another genuine user input permits another idle tidy. A real user message during tidy supersedes it and restores ordinary rollover policy. Session replacement, tree navigation, reload and shutdown discard timers and scope; opening a saved session alone never starts a timer.
+
+The message stays live only for its request id and originating window. After settlement, rollover, user input or a lifecycle reset, later model context replaces it with a one-line “expired; no action required” notice; the journal is untouched. It must not survive in a retained tail as an active command.
+
+Only TUI and RPC sessions schedule tidy; print (`pi -p`) and JSON modes do not. Timers are also `unref()`'ed, so they cannot keep a process alive. This is intended for providers with roughly one-hour prompt-cache retention: do small housekeeping while the cache may still be warm, rather than waiting for the next user message. Actual cache TTL, cache hits and savings depend on the provider and are not guaranteed.
 
 ## Install
 

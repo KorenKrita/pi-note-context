@@ -13,6 +13,8 @@ import { join } from "node:path";
 import { buildSessionProjection, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { flushLedger } from "../src/ledger.ts";
 import { ROLLOVER_DETAILS_KIND } from "../src/history.ts";
+import { IDLE_TIDY_CUSTOM_TYPE } from "../src/idle-tidy.ts";
+import { withIdleTimers } from "./idle-timer.ts";
 import { notebookEntry, rolloverEntry, round, user } from "./fixtures.ts";
 
 // One OS temp root per run; each harness gets its own agent dir under it so config and ledger
@@ -47,7 +49,8 @@ function harness(config: Record<string, unknown> = {}) {
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, Tool>();
   const compactCalls: { onComplete?: () => void; onError?: (e: Error) => void }[] = [];
-  const sent: { customType?: string }[] = [];
+  const sent: { customType?: string; content?: string; details?: unknown }[] = [];
+  const deliveries: unknown[] = [];
   let extra = 0;
   const pi = {
     on: (ev: string, h: Handler) => {
@@ -58,19 +61,21 @@ function harness(config: Record<string, unknown> = {}) {
     appendEntry: (customType: string, data: unknown) => {
       branch.push({ id: `x${++extra}`, parentId: null, timestamp: new Date().toISOString(), type: "custom", customType, data } as SessionEntry);
     },
-    sendMessage: (msg: { customType?: string }) => {
+    sendMessage: (msg: (typeof sent)[number], options: unknown) => {
       sent.push(msg);
+      deliveries.push(options);
     },
   } as unknown as ExtensionAPI;
   noteContext(pi);
 
   const usage = { tokens: 365_000, contextWindow: 1_000_000 }; // reminder zone of the 400K budget (≥ 400K − 16384 − 24000): host rollover allowed
-  const state = { model: { provider: "p", id: "m", contextWindow: 1_000_000 } };
+  const state = { model: { provider: "p", id: "m", contextWindow: 1_000_000 }, mode: "print" as ExtensionContext["mode"], busy: false, queued: false };
   // The current run's abort signal, as Pi exposes it on ctx.signal while a run is active.
   const run = { controller: new AbortController() };
   const ctx = {
     cwd: agentDir,
     hasUI: false,
+    get mode() { return state.mode; },
     get model() {
       return state.model;
     },
@@ -80,7 +85,8 @@ function harness(config: Record<string, unknown> = {}) {
     sessionManager: { getBranch: () => branch, buildContextEntries: () => branch, buildSessionProjection: () => buildSessionProjection(branch.map((e, i) => ({ ...e, parentId: i ? branch[i - 1]!.id : null }))), getSessionId: () => "s1", getLeafId: () => branch[branch.length - 1]?.id ?? null },
     getContextUsage: () => usage,
     isProjectTrusted: () => true,
-    isIdle: () => true,
+    isIdle: () => !state.busy,
+    hasPendingMessages: () => state.queued,
     compact: (opts: (typeof compactCalls)[number]) => {
       compactCalls.push(opts);
     },
@@ -147,8 +153,145 @@ function harness(config: Record<string, unknown> = {}) {
     run.controller = new AbortController();
     await emit("agent_start");
   };
-  return { branch, ctx, usage, state, emit, notes, history, newContext, turnEnd, settle, boundary, compactions, piHost, sent, compactCalls, ledgerRows, abort, startRun };
+  return { branch, ctx, usage, state, emit, notes, history, newContext, turnEnd, settle, boundary, compactions, piHost, sent, deliveries, compactCalls, ledgerRows, abort, startRun };
 }
+
+describe("idle tidy hook policy", () => {
+  const beginTidy = async (h: ReturnType<typeof harness>, timers: { fire(): void }[]) => {
+    h.state.mode = "rpc";
+    await h.emit("input", { source: "rpc" });
+    await h.startRun();
+    await h.emit("agent_end");
+    await h.settle();
+    timers.at(-1)!.fire();
+    await h.startRun();
+  };
+
+  test("timer is unref'ed; tidy defers host auto-rollover/reminders but new_context keeps its gate", async () => withIdleTimers(async (timers) => {
+    const h = harness({ idleTidyEnabled: true, jevEnabled: false });
+    await beginTidy(h, timers);
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]).toMatchObject({ customType: IDLE_TIDY_CUSTOM_TYPE, details: { window: 1 } });
+    expect(typeof (h.sent[0]!.details as { requestId: string }).requestId).toBe("string");
+    expect(h.deliveries[0]).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+    const message = { ...h.sent[0], role: "custom", timestamp: 1 };
+    const projected = await h.emit("context", { messages: [message] });
+    expect((projected[0] as { messages: unknown[] }).messages[0]).toBe(message);
+    expect(await h.notes({ reviewed: true })).not.toContain("Rollover scheduled by the host");
+    await h.turnEnd();
+    expect(h.sent).toHaveLength(1); // no ordinary reminder
+    expect(await h.newContext()).toContain("rollover scheduled");
+    await h.settle();
+    expect(h.compactions()).toBe(1);
+    const expired = await h.emit("context", { messages: [message] });
+    expect((expired[0] as { messages: { content: string }[] }).messages[0]!.content).toContain("expired; no action required");
+    await h.startRun();
+    await h.emit("agent_end");
+    expect(timers).toHaveLength(1); // continuation cannot loop
+  }));
+
+  test("tidy does not bypass low reclaim or freshness; userRequested is not assumed", async () => withIdleTimers(async (timers) => {
+    const h = harness({ idleTidyEnabled: true, jevEnabled: false, minReclaimTokens: 1_000_000 });
+    await beginTidy(h, timers);
+    await h.notes({ reviewed: true });
+    await expect(h.newContext()).rejects.toThrow("too little");
+    for (let i = 20; i < 32; i++) h.branch.push(...round(i, 20));
+    await expect(h.newContext()).rejects.toThrow("notebook predates");
+  }));
+
+  test("tidy's high-pressure fallback still guards tools, checkpoints and rolls over at turn_end", async () => withIdleTimers(async (timers) => {
+    const h = harness({ idleTidyEnabled: true, jevEnabled: false });
+    await beginTidy(h, timers);
+    const message = { ...h.sent[0], role: "custom", timestamp: 1 };
+    h.usage.tokens = 380_000;
+    await h.turnEnd();
+    expect(h.sent.some((m) => m.customType === "note-context/maintenance")).toBe(true);
+    expect((await h.emit("tool_call", { toolName: "read" }))[0]).toMatchObject({ block: true });
+    await h.notes({ reviewed: true });
+    await h.turnEnd();
+    expect(h.boundary[0]).toMatchObject({ reason: "turn_end", drafts: [{ type: "compaction", details: { reason: "fallback" } }, { type: "custom_message" }] });
+    await h.emit("turn_start"); // reconcile without ending the tidy run
+    const expired = await h.emit("context", { messages: [message] });
+    expect((expired[0] as { messages: { content: string }[] }).messages[0]!.content).toContain("expired; no action required");
+    expect(await h.notes({ reviewed: true })).not.toContain("Rollover scheduled by the host");
+    await h.emit("agent_end");
+    await h.settle();
+    expect(timers).toHaveLength(1);
+  }));
+
+  test("final settlement expires tidy in the same window; extension input cannot re-arm but genuine input can", async () => withIdleTimers(async (timers) => {
+    const h = harness({ idleTidyEnabled: true, jevEnabled: false });
+    await beginTidy(h, timers);
+    const message = { ...h.sent[0], role: "custom", timestamp: 1 };
+    await h.emit("agent_end");
+    await h.settle();
+    expect(timers).toHaveLength(1);
+    const expired = await h.emit("context", { messages: [message] });
+    expect((expired[0] as { messages: { content: string }[] }).messages[0]!.content).toContain("expired; no action required");
+    await h.emit("input", { source: "extension" });
+    await h.startRun();
+    await h.emit("agent_end");
+    await h.settle();
+    expect(timers).toHaveLength(1);
+    await h.emit("input", { source: "rpc" });
+    await h.startRun();
+    expect(await h.notes({ reviewed: true })).toContain("Rollover scheduled by the host");
+    await h.emit("agent_end");
+    expect(timers).toHaveLength(2);
+    expect(timers[1]!.handle.hasRef()).toBe(false);
+  }));
+
+  test("user input during tidy supersedes it and re-enables the normal reminder", async () => withIdleTimers(async (timers) => {
+    const h = harness({ idleTidyEnabled: true, jevEnabled: false });
+    await beginTidy(h, timers);
+    await h.emit("input", { source: "rpc" });
+    await h.turnEnd();
+    expect(h.sent.some((m) => m.customType === "note-context/reminder")).toBe(true);
+    await h.emit("agent_end");
+    expect(timers).toHaveLength(2);
+  }));
+
+  test("only tui/rpc opt-in sessions arm; shutdown/session replacement/agent_start/input cancel", async () => withIdleTimers(async (timers) => {
+    for (const mode of ["print", "json", "tui", "rpc"] as const) {
+      for (const enabled of [false, true]) {
+        const h = harness({ idleTidyEnabled: enabled, jevEnabled: false });
+        h.state.mode = mode;
+        await h.emit("session_start");
+        await h.emit("input", { source: mode === "rpc" ? "rpc" : "interactive" });
+        await h.startRun();
+        const count = timers.length;
+        await h.emit("agent_end");
+        expect(timers.length - count).toBe(enabled && (mode === "tui" || mode === "rpc") ? 1 : 0);
+        await h.emit("session_shutdown");
+      }
+    }
+    for (const event of ["agent_start", "before_agent_start", "input", "session_start", "session_before_switch", "session_before_fork", "session_tree", "session_shutdown"]) {
+      const h = harness({ idleTidyEnabled: true, jevEnabled: false });
+      h.state.mode = "rpc";
+      await h.emit("input", { source: "rpc" });
+      await h.emit("agent_end");
+      const timer = timers.at(-1)!;
+      expect(timer.handle.hasRef()).toBe(false);
+      await h.emit(event, { source: "rpc", systemPromptOptions: {} });
+      timer.fire(); // emulate a callback already dispatched when cancellation happened
+      expect(h.sent).toEqual([]);
+    }
+  }));
+
+  test("deadline checks pending/busy/aborted state before sending", async () => withIdleTimers(async (timers) => {
+    for (const reason of ["busy", "queued", "aborted"]) {
+      const h = harness({ idleTidyEnabled: true, jevEnabled: false });
+      h.state.mode = "rpc";
+      await h.emit("input", { source: "rpc" });
+      if (reason === "aborted") h.abort();
+      await h.emit("agent_end");
+      if (reason === "busy") h.state.busy = true;
+      if (reason === "queued") h.state.queued = true;
+      timers.at(-1)!.fire();
+      expect(h.sent).toEqual([]);
+    }
+  }));
+});
 
 describe("history tool wiring", () => {
   test("search defaults to excluding visible messages; includeActive overrides it and id stays unchanged", async () => {

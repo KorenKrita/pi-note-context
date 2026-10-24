@@ -22,6 +22,9 @@ export interface Config {
   entryIdTrailers: boolean;
   /** Host schedules a rollover after a notes write when the gate passes (no new_context call needed). */
   autoRollover: boolean;
+  /** Opt-in housekeeping after the agent finishes, at most once until the next real user input. */
+  idleTidyEnabled: boolean;
+  idleTidyAfterMinutes: number;
   /** Reminder zone and host auto-rollover floor are measured against min(contextWindow, budgetTokens): large windows degrade before they fill. */
   budgetTokens: number;
   /** Forced fallback is measured against min(contextWindow, fallbackBudgetTokens); defaults to budgetTokens. */
@@ -45,6 +48,8 @@ export const DEFAULT_CONFIG: Config = {
   historyReadMaxChars: 12_000,
   entryIdTrailers: true,
   autoRollover: true,
+  idleTidyEnabled: false,
+  idleTidyAfterMinutes: 55,
   budgetTokens: 400_000,
   fallbackBudgetTokens: 400_000,
   statusStepTokens: 40_000,
@@ -65,6 +70,8 @@ export function parseConfig(raw: unknown): Config {
   if (!raw || typeof raw !== "object") return DEFAULT_CONFIG;
   const r = raw as Record<string, unknown>;
   const budgetTokens = num(r["budgetTokens"], DEFAULT_CONFIG.budgetTokens, 32_000);
+  // Node clamps overflowing timeouts to 1 ms: reject them rather than tidying immediately.
+  const idleMinutes = num(r["idleTidyAfterMinutes"], DEFAULT_CONFIG.idleTidyAfterMinutes, 1);
   return {
     enabled: typeof r["enabled"] === "boolean" ? r["enabled"] : DEFAULT_CONFIG.enabled,
     limits: {
@@ -83,6 +90,8 @@ export function parseConfig(raw: unknown): Config {
     historyReadMaxChars: num(r["historyReadMaxChars"], DEFAULT_CONFIG.historyReadMaxChars, 500),
     entryIdTrailers: typeof r["entryIdTrailers"] === "boolean" ? r["entryIdTrailers"] : DEFAULT_CONFIG.entryIdTrailers,
     autoRollover: typeof r["autoRollover"] === "boolean" ? r["autoRollover"] : DEFAULT_CONFIG.autoRollover,
+    idleTidyEnabled: typeof r["idleTidyEnabled"] === "boolean" ? r["idleTidyEnabled"] : DEFAULT_CONFIG.idleTidyEnabled,
+    idleTidyAfterMinutes: idleMinutes * 60_000 <= 2_147_483_647 ? idleMinutes : DEFAULT_CONFIG.idleTidyAfterMinutes,
     budgetTokens,
     fallbackBudgetTokens: num(r["fallbackBudgetTokens"], budgetTokens, 32_000),
     statusStepTokens: num(r["statusStepTokens"], DEFAULT_CONFIG.statusStepTokens, 1_000),

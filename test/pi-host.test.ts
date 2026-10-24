@@ -10,6 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type, fauxAssistantMessage, fauxProvider, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { IDLE_TIDY_CUSTOM_TYPE } from "../src/idle-tidy.ts";
+import { withIdleTimers } from "./idle-timer.ts";
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "note-context-host-"));
 const savedDir = process.env["PI_CODING_AGENT_DIR"];
@@ -77,6 +79,50 @@ const record = (seen: TranscriptContext[], step: FauxResponseStep): FauxResponse
 };
 
 describe("Pi host integration", () => {
+  test("RPC idle tidy triggers a real run once, persists notes and expires the request before the next user run", async () => withIdleTimers(async (timers) => {
+    const { session, sessionManager, seen } = await host((s) => [
+      record(s, fauxAssistantMessage("Done with the user task.")),
+      record(s, fauxAssistantMessage(fauxToolCall("notes", { sections: { Task: "tidied", State: "new conclusions recorded" } }), { stopReason: "toolUse" })),
+      record(s, fauxAssistantMessage("Tidied; no rollover needed.")),
+      record(s, fauxAssistantMessage("Answering the next user.")),
+    ], { idleTidyEnabled: true, jevEnabled: false });
+    try {
+      await session.bindExtensions({ mode: "rpc" });
+      await session.prompt("Do the task.", { source: "rpc" });
+      await session.waitForIdle();
+      expect(timers).toHaveLength(1);
+      expect(timers[0]!.handle.hasRef()).toBe(false);
+      timers[0]!.fire();
+      await session.waitForIdle();
+      expect(seen).toHaveLength(3);
+      expect(JSON.stringify(seen[1]!.messages)).toContain("Idle notebook tidy:");
+      expect(sessionManager.getBranch().some((e) => e.type === "custom" && e.customType === "note-context/notebook")).toBe(true);
+      expect(timers).toHaveLength(1); // tidy did not schedule another tidy
+      await session.prompt("Another question.", { source: "rpc" });
+      await session.waitForIdle();
+      expect(timers).toHaveLength(2);
+      const next = JSON.stringify(seen[3]!.messages);
+      expect(next).toContain("earlier idle notebook tidy — expired; no action required");
+      expect(next).not.toContain("Idle notebook tidy:");
+      const persisted = sessionManager.getBranch().find((e) => e.type === "custom_message" && e.customType === IDLE_TIDY_CUSTOM_TYPE);
+      expect(persisted?.type === "custom_message" && persisted.content).toContain("Idle notebook tidy:");
+    } finally {
+      session.dispose();
+    }
+  }));
+
+  test("print mode with idle tidy enabled never schedules a timer", async () => withIdleTimers(async (timers) => {
+    const { session } = await host((s) => [record(s, fauxAssistantMessage("Done."))], { idleTidyEnabled: true, jevEnabled: false });
+    try {
+      await session.bindExtensions({ mode: "print" });
+      await session.prompt("hello");
+      await session.waitForIdle();
+      expect(timers).toHaveLength(0);
+    } finally {
+      session.dispose();
+    }
+  }));
+
   test("guidance is added as a structured system prompt section, not a forced prompt", async () => {
     const { session, seen } = await host((s) => [record(s, fauxAssistantMessage("ok"))]);
     await session.prompt("hello");

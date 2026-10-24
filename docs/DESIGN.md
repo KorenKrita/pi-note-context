@@ -200,6 +200,19 @@ No token counts (§4.1): the reminder asks for the action, not a judgement about
 
 Tool dispatch enforcement during `maintenance:requested`: a `tool_call` handler returns `{ block: true, reason: "context maintenance in progress — only `notes` is available until the checkpoint lands" }` for every tool except `notes`; Pi turns the block into an error tool result the model sees, so the instruction is enforced, not merely stated.
 
+### 6.1 Idle tidy (opt-in)
+
+`idleTidyEnabled` defaults to false; `idleTidyAfterMinutes` defaults to 55. The purpose is to maintain notes while a roughly one-hour provider cache may still be warm, not to implement an idle forced rollover/pause. Cache retention and savings are provider-dependent.
+
+- Only `input` with source `interactive` or `rpc` grants a tidy opportunity. Extension-originated messages do not grant one.
+- `agent_end` starts the idle clock, provided the feature is enabled and `ctx.mode` is `tui` or `rpc`. Input, `before_agent_start` and `agent_start` cancel it. A retry/continuation therefore gets its own end-based clock; `agent_end` is not assumed to mean Pi has settled.
+- The deadline re-checks `ctx.isIdle()`, `hasPendingMessages()`, model availability, abort state, pending/in-flight rollover/proposal and checkpoint state. A busy or invalidated context does not dispatch. The timer is unref'ed and uses a generation guard against stale callbacks.
+- Dispatch consumes the opportunity before sending a visible `note-context/idle-tidy` custom message with `{ triggerTurn: true, deliverAs: "followUp" }`. The agent reads/tidies notes, then chooses whether to call `new_context` with its unchanged gate; housekeeping does not imply a user-requested rollover.
+- While tidy is active, `considerAutoRollover` returns without scheduling and the ordinary reminder path is skipped. The fallback check still runs first: high pressure keeps its checkpoint, guard, repair budget and rollover behavior. The tidy scope persists across automatic continuations and ends at `agent_settled`; a new genuine user input supersedes it immediately.
+- No timer is armed at the end of tidy or by its continuations, even after rollover. Only another genuine user input re-arms it. Failed dispatch is not automatically retried.
+- `details: { requestId, window }` scopes the instruction. The request id is unique across resets/reloads. Only the active id in its originating window is preserved by `context`; completed, interrupted, earlier-window or unscoped messages become “expired; no action required”. The persisted journal is unchanged.
+- Session lifecycle resets cancel the timer and discard eligibility/scope; shutdown does so before flushing the ledger. Startup/resume alone never arms a timer. Print/JSON modes never schedule one.
+
 ## 7. Guidance to the model
 
 Added to the system prompt as the `note_context` section of `systemPromptOptions.sections` in `before_agent_start` (not a returned `systemPrompt`, which would force a whole-prompt replacement). Final text:
@@ -255,6 +268,8 @@ Correctness signals require reading sessions; the ledger locates candidates. Kil
 ```json
 {
   "enabled": true,
+  "idleTidyEnabled": false,
+  "idleTidyAfterMinutes": 55,
   "notebookMaxBytes": 16384,
   "notebookMaxTokens": 4096,
   "leadTokens": 24000,
@@ -277,6 +292,7 @@ src/
   gate.ts         new_context structural checks, reclaim projection
   rollover.ts     session_before_compact handler, summary template, pinned-request selection
   maintenance.ts  reminder + fallback state machine, tool-dispatch guard
+  idle-tidy.ts    opt-in idle clock, single-use eligibility and request scope
   history.ts      allowlisted index, search/read/list, id trailers
   status.ts       status line (notes staleness), odometer, suffix patch
   guidance.ts     system-prompt section and tool descriptions (single source)
@@ -312,7 +328,7 @@ Pi peer version: `0.87.x`. Tests: Bun. Host fixture on real Pi for: gate blocker
 
 Observation from real use and from the pi-context ledger: models rarely produce the meta-cognitive act of deciding to start a new window, even with good guidance in view — attention goes to the task, not to the model's own context. Writing notes, by contrast, is a task-shaped act models do perform. So the host uses the notes write as the trigger:
 
-- After every successful `notes` write or review, the host runs the same gate as `new_context` (§3.2). If it passes and no rollover is pending, the host schedules the rollover itself (`reason: "host"`) and appends one sentence to the notes result: *"Rollover scheduled by the host: window #N → #N+1 at the end of this turn. Finish what this turn needs; the new window opens with these notes."*
+- Except during an active idle tidy (§6.1), after every successful `notes` write or review, the host runs the same gate as `new_context` (§3.2). If it passes and no rollover is pending, the host schedules the rollover itself (`reason: "host"`) and appends one sentence to the notes result: *"Rollover scheduled by the host: window #N → #N+1 at the end of this turn. Finish what this turn needs; the new window opens with these notes."*
 - `new_context` remains available as a manual accelerator. Calling it while a host rollover is pending runs the request's gate (freshness and, unless `userRequested: true`, reclaim; a host schedule is not "already pending" for it) and, on success, **confirms** the schedule with `reason: "model"` or `reason: "user"`: host-only blockers (pressure floor, external owner) no longer cancel it at settle. Pending user schedules always reject repeats. Pending model schedules reject repeats except on the external-owner ordinary model path, which preserves legacy re-confirmation behavior (§3.2). User requests bypass both economic thresholds, but neither notebook existence nor freshness.
 - Config `autoRollover` (default `true`) turns this off. Two economic inputs: `minReclaimTokens` (how much must leave) and a pressure floor (originally `autoRolloverFloorPercent`, default `50`; since 2026-09-23 the reminder threshold — see below). The floor was added after the first real host rollover fired at 84K/400K (21%) at the end of a task: with cacheWrite at ~25× cacheRead on the provider in use, that rollover cost more than it could recover in the remaining turns. At 50% the break-even is ~5 further calls; below it the model can still call `new_context` itself — that call is the judgment the floor stands in for. A fuller economic model (cache-rebuild cost × remaining requests, as in SoL-Pi's `economics.ts`) stays deferred until `window_cache` rows give real turns-per-window data.
 - Ledger `gate` rows carry `reason: "model" | "user" | "host"` on acceptance and refusal, plus `auto: true` when the host initiated; a host attempt refused by the floor is logged as `ok: false, blocker: "low_pressure"` so the threshold can be tuned from data. Historical rows without `reason` remain valid; no ledger migration is needed.

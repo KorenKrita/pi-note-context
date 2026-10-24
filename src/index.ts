@@ -20,6 +20,7 @@ import {
 } from "./guidance.ts";
 import { activeHistoryIds, currentWindow, indexBranch, isRolloverDetails, list, read, renderList, renderRead, renderSearch, search } from "./history.ts";
 import { appendLedger, flushLedger } from "./ledger.ts";
+import { IdleTidy, IDLE_TIDY_CUSTOM_TYPE, IDLE_TIDY_TEXT } from "./idle-tidy.ts";
 import { maintenanceRequestText, reminderText, reminderThreshold, step, zoneFor, type MaintenanceState, type Thresholds } from "./maintenance.ts";
 import { applySections, makeRecord, NOTEBOOK_ENTRY_TYPE, reconstructNotebook, renderNotebook, type Notebook } from "./notebook.ts";
 import { estimateTokens as estimateText } from "./notebook.ts";
@@ -87,6 +88,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   let lastCompactionWasOurs = false;
   let cacheAcc = { calls: 0, cacheRead: 0, input: 0 }; // provider cache stats for the current window
   const statusOdometer = new StatusOdometer();
+  const idleTidy = new IdleTidy(config.idleTidyEnabled, config.idleTidyAfterMinutes * 60_000);
   /** Jev kinds by user entry id. Entry ids are stable, so this survives window and branch changes. */
   const kinds = new Map<string, UserKind>();
   const classifying = new Set<string>();
@@ -98,6 +100,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   let unrecorded: { entryId: string | null; shown: boolean } | null = null;
 
   const resetVolatile = () => {
+    idleTidy.reset();
     branchChangedPending = false;
     pendingRollover = null;
     inFlightRollover = null;
@@ -434,7 +437,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   }
 
   function considerAutoRollover(ctx: ExtensionContext, notebook: Notebook): string {
-    if (!config.autoRollover) return "";
+    if (!config.autoRollover || idleTidy.activeRequest !== null) return "";
     if (pendingRollover || inFlightRollover || maintenance.kind !== "idle") return "";
     const window = currentWindow(branchOf(ctx));
     const verdict = hostGate(ctx, notebook);
@@ -544,6 +547,7 @@ export default function noteContext(pi: ExtensionAPI): void {
 
   /** Volatile state for a freshly opened window. */
   function onWindowOpened(): void {
+    idleTidy.cancel();
     pendingRollover = null;
     inFlightRollover = null;
     maintenance = step(maintenance, { type: "rollover_done" }, () => attemptCounter).state;
@@ -668,12 +672,24 @@ export default function noteContext(pi: ExtensionAPI): void {
     return true;
   }
 
+  pi.on("input", async (event) => {
+    idleTidy.input(event.source === "interactive" || event.source === "rpc");
+    return undefined;
+  });
   pi.on("agent_start", async (_event, ctx) => {
+    idleTidy.cancel();
     classifyPending(ctx);
     runAborted = false;
   });
   pi.on("agent_end", async (_event, ctx) => {
     if (ctx.signal?.aborted) runAborted = true;
+    idleTidy.agentEnded(ctx.mode === "tui" || ctx.mode === "rpc",
+      () => ctx.isIdle() && !ctx.hasPendingMessages() && !runAborted && ctx.model !== undefined
+        && !pendingRollover && !inFlightRollover && !proposal && maintenance.kind === "idle",
+      (requestId) => pi.sendMessage(
+        { customType: IDLE_TIDY_CUSTOM_TYPE, content: IDLE_TIDY_TEXT, display: true, details: { requestId, window: currentWindow(branchOf(ctx)) } },
+        { triggerTurn: true, deliverAs: "followUp" },
+      ));
   });
 
   const scheduled = (r: RolloverReason) => r === "model" || r === "user" || r === "host";
@@ -708,6 +724,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   // Rollovers agent_before_settle did not take: an external compaction owner, a declined
   // template (Pi's LLM summary takes over), or another extension compacting at that boundary.
   pi.on("agent_settled", async (_event, ctx) => {
+    idleTidy.settled();
     reconcileProposal(ctx);
     if (!pendingRollover || !scheduled(pendingRollover.reason)) return;
     // ESC means stop: rolling over would compact and then trigger a continuation turn the user
@@ -796,7 +813,7 @@ export default function noteContext(pi: ExtensionAPI): void {
       }
       return;
     }
-    if (reminderShownForWindow === window) return;
+    if (idleTidy.activeRequest !== null || reminderShownForWindow === window) return;
     reminderShownForWindow = window;
     appendLedger({ kind: "reminder", session: sessionId(ctx), window, zone });
     pi.sendMessage(
@@ -810,6 +827,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   // a whole-prompt replacement, which drops section changes made by extensions loaded later and
   // prevents Pi from recording the change as a transcript delta.
   pi.on("before_agent_start", async (event) => {
+    idleTidy.cancel(); // Prompt preparation is already busy, before agent_start.
     // An earlier handler forced the whole prompt: sections are not rendered, so append to it.
     const forced = event.systemPromptOptions.forceSystemPrompt;
     if (forced !== undefined) return forced.includes(SYSTEM_PROMPT_SECTION) ? undefined : { systemPrompt: `${forced}\n\n${SYSTEM_PROMPT_SECTION}` };
@@ -826,6 +844,11 @@ export default function noteContext(pi: ExtensionAPI): void {
       // request) are dropped; the status line now lives inside tool results.
       .filter((m) => !(m.role === "custom" && m.customType === LEGACY_STATUS_CUSTOM_TYPE))
       .map((m) => {
+        if (m.role === "custom" && m.customType === IDLE_TIDY_CUSTOM_TYPE) {
+          const scope = m.details as { requestId?: string; window?: number } | undefined;
+          if (idleTidy.activeRequest !== null && scope?.requestId === idleTidy.activeRequest && scope.window === window) return m;
+          return { ...m, content: "[note-context] (earlier idle notebook tidy — expired; no action required)" };
+        }
         // Old reminders carry both a live rollover command and an obsolete notebook snapshot.
         // Unscoped reminders from older versions cannot be proved current, so expire them too.
         if (m.role === "custom" && m.customType === REMINDER_CUSTOM_TYPE) {
@@ -901,6 +924,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   pi.on("session_before_switch", async () => resetVolatile());
   pi.on("session_before_fork", async () => resetVolatile());
   pi.on("session_shutdown", async () => {
+    idleTidy.reset();
     await flushLedger();
   });
 
