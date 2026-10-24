@@ -681,6 +681,9 @@ export default function noteContext(pi: ExtensionAPI): void {
     idleTidy.input(event.source === "interactive" || event.source === "rpc");
     return undefined;
   });
+  pi.on("user_bash", async () => {
+    idleTidy.cancel(); // TUI !/!! bypass input; leave execution to Pi/other extensions.
+  });
   pi.on("agent_start", async (_event, ctx) => {
     idleTidy.agentStarted();
     classifyPending(ctx);
@@ -938,6 +941,7 @@ export default function noteContext(pi: ExtensionAPI): void {
   pi.registerCommand("notes", {
     description: "Show the current session notebook",
     handler: async (_args, ctx) => {
+      idleTidy.cancel(); // Extension slash commands bypass input too.
       const nb = notebookOf(ctx);
       const body = nb.revision === 0 ? "Notebook is empty." : `Notebook revision ${nb.revision}\n\n${renderNotebook(nb.sections)}`;
       if (ctx.hasUI) ctx.ui.notify(body, "info");

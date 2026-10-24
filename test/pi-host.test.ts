@@ -162,6 +162,31 @@ describe("Pi host integration", () => {
     }
   }));
 
+  test.each(["!", "!!", "/notes"])("user activity through %s cancels idle tidy without an input event", async (command) => withIdleTimers(async (timers) => {
+    const { session, seen } = await host((s) => [
+      record(s, fauxAssistantMessage("Done.")),
+      record(s, fauxAssistantMessage("Unexpected tidy.")),
+    ], { idleTidyEnabled: true, jevEnabled: false });
+    try {
+      await session.bindExtensions({ mode: "rpc" });
+      await session.prompt("Do the task.", { source: "rpc" });
+      await session.waitForIdle();
+      expect(timers).toHaveLength(1);
+      if (command === "/notes") await session.prompt(command);
+      else {
+        // TUI handleBashCommand calls this runner directly, before starting the shell.
+        const result = await session.extensionRunner!.emitUserBash({ type: "user_bash", command: "printf done", excludeFromContext: command === "!!", cwd: tmpRoot });
+        expect(result).toBeUndefined(); // cancellation must not intercept/replace the user's shell command
+      }
+      timers[0]!.fire(); // an already-dispatched callback must also be invalidated
+      await session.waitForIdle();
+      expect(seen).toHaveLength(1);
+      expect(timers).toHaveLength(1); // neither command arms a new opportunity
+    } finally {
+      session.dispose();
+    }
+  }));
+
   test.each([undefined, false, true])("history search excludes its issuing assistant for includeActive=%s", async (includeActive) => {
     const { session, sessionManager } = await host((s) => [
       record(s, fauxAssistantMessage(fauxToolCall("history", { query: "unobtainium-unique-marker", ...(includeActive === undefined ? {} : { includeActive }), from: "newest" }), { stopReason: "toolUse" })),
