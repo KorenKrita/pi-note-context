@@ -880,41 +880,58 @@ export default function noteContext(pi: ExtensionAPI): void {
     const branch = branchOf(ctx);
     const activeAttempt = maintenance.kind === "requested" ? maintenance.attempt : null;
     const window = currentWindow(branch);
-    let messages = event.messages
-      // Status messages written by earlier versions (a trailing custom message per
-      // request) are dropped; the status line now lives inside tool results.
-      .filter((m) => !(m.role === "custom" && m.customType === LEGACY_STATUS_CUSTOM_TYPE))
-      .map((m) => {
-        if (m.role === "custom" && m.customType === IDLE_TIDY_CUSTOM_TYPE) {
-          const scope = m.details as { requestId?: string; window?: number } | undefined;
-          if (idleTidy.activeRequest !== null && scope?.requestId === idleTidy.activeRequest && scope.window === window) return m;
-          return { ...m, content: "[note-context] (earlier idle notebook tidy — expired; no action required)" };
+    // Preserve the context array's membership and object identities: Pi otherwise
+    // folds mid-conversation system messages into the leading system prompt.
+    const messages = event.messages;
+    for (const m of messages) {
+      // Earlier versions persisted status messages; an empty custom message has
+      // no prompt text, while removing it would trigger the system-message fold.
+      if (m.role === "custom" && m.customType === LEGACY_STATUS_CUSTOM_TYPE) {
+        m.content = [];
+        continue;
+      }
+      if (m.role === "custom" && m.customType === IDLE_TIDY_CUSTOM_TYPE) {
+        const scope = m.details as { requestId?: string; window?: number } | undefined;
+        if (idleTidy.activeRequest !== null && scope?.requestId === idleTidy.activeRequest && scope.window === window) continue;
+        m.content = "[note-context] (earlier idle notebook tidy — expired; no action required)";
+        continue;
+      }
+      if (m.role === "custom" && (m.customType === TIDY_CONTINUE_CUSTOM_TYPE || (m.customType === "note-context/continue" && m.content === TIDY_CONTINUE))) {
+        const scope = m.details as { requestId?: string; window?: number } | undefined;
+        if (tidyContinuation !== null && scope?.requestId === tidyContinuation.requestId && scope.window === window && tidyContinuation.window === window) {
+          tidyContinuation.seen = true;
+          continue;
         }
-        if (m.role === "custom" && (m.customType === TIDY_CONTINUE_CUSTOM_TYPE || (m.customType === "note-context/continue" && m.content === TIDY_CONTINUE))) {
-          const scope = m.details as { requestId?: string; window?: number } | undefined;
-          if (tidyContinuation !== null && scope?.requestId === tidyContinuation.requestId && scope.window === window && tidyContinuation.window === window) {
-            tidyContinuation.seen = true;
-            return m;
-          }
-          // Includes legacy unscoped tidy text and saved messages after reload/restart.
-          return { ...m, content: "[note-context] (earlier idle tidy continuation — expired; no action required)" };
-        }
-        // Old reminders carry both a live rollover command and an obsolete notebook snapshot.
-        // Unscoped reminders from older versions cannot be proved current, so expire them too.
-        if (m.role === "custom" && m.customType === REMINDER_CUSTOM_TYPE) {
-          if ((m.details as { window?: number } | undefined)?.window === window) return m;
-          return { ...m, content: "[note-context] (earlier rollover reminder — expired; no action required)" };
-        }
-        // A maintenance instruction is imperative; once its attempt is no longer active it must
-        // not survive in the retained tail as a live command.
-        if (m.role === "custom" && m.customType === MAINTENANCE_CUSTOM_TYPE) {
-          const attempt = (m.details as { attempt?: number } | undefined)?.attempt;
-          if (attempt !== undefined && attempt === activeAttempt) return m;
-          return { ...m, content: `[note-context] (earlier maintenance request #${attempt ?? "?"} — completed; no action required)` };
-        }
-        return m;
-      });
-    if (config.entryIdTrailers) messages = addTrailers(messages, buildIdIndex(branch));
+        // Includes legacy unscoped tidy text and saved messages after reload/restart.
+        m.content = "[note-context] (earlier idle tidy continuation — expired; no action required)";
+        continue;
+      }
+      // Old reminders carry both a live rollover command and an obsolete notebook snapshot.
+      // Unscoped reminders from older versions cannot be proved current, so expire them too.
+      if (m.role === "custom" && m.customType === REMINDER_CUSTOM_TYPE) {
+        if ((m.details as { window?: number } | undefined)?.window === window) continue;
+        m.content = "[note-context] (earlier rollover reminder — expired; no action required)";
+        continue;
+      }
+      // A maintenance instruction is imperative; once its attempt is no longer active it must
+      // not survive in the retained tail as a live command.
+      if (m.role === "custom" && m.customType === MAINTENANCE_CUSTOM_TYPE) {
+        const attempt = (m.details as { attempt?: number } | undefined)?.attempt;
+        if (attempt !== undefined && attempt === activeAttempt) continue;
+        m.content = `[note-context] (earlier maintenance request #${attempt ?? "?"} — completed; no action required)`;
+        continue;
+      }
+    }
+    if (config.entryIdTrailers) {
+      const decorated = addTrailers(messages, buildIdIndex(branch));
+      for (let i = 0; i < messages.length; i++) {
+        const original = messages[i]!;
+        const replacement = decorated[i]!;
+        if (replacement !== original && (original.role === "user" || original.role === "toolResult") &&
+            (replacement.role === "user" || replacement.role === "toolResult")) original.content = replacement.content;
+      }
+    }
+    // Pi's identity comparison accepts the original array with its original elements.
     return { messages };
   });
 

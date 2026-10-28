@@ -86,6 +86,25 @@ const record = (seen: TranscriptContext[], step: FauxResponseStep): FauxResponse
 };
 
 describe("Pi host integration", () => {
+  test("context decorates in place without changing array membership or message identities", async () => {
+    let before: readonly import("@earendil-works/pi-agent-core").AgentMessage[] = [];
+    let checked = false;
+    const { session, seen } = await host((s) => [record(s, fauxAssistantMessage("ok"))], { jevEnabled: false }, 200_000,
+      [(pi) => { pi.on("context", (event) => { before = [...event.messages]; }); }], undefined,
+      [(pi) => { pi.on("context", (event) => {
+        expect(event.messages).toHaveLength(before.length);
+        event.messages.forEach((m, i) => expect(m).toBe(before[i]!));
+        expect(JSON.stringify(event.messages)).toContain("[note-context: this-message-id=");
+        checked = true;
+      }); }]);
+    try {
+      await session.prompt("Keep this request tagged.");
+      expect(checked).toBe(true);
+      expect(JSON.stringify(seen[0]!.messages)).toContain("[note-context: this-message-id=");
+    } finally {
+      session.dispose();
+    }
+  });
   test("RPC idle tidy triggers a real run once, persists notes and expires the request before the next user run", async () => withIdleTimers(async (timers) => {
     const { session, sessionManager, seen } = await host((s) => [
       record(s, fauxAssistantMessage("Done with the user task.")),
